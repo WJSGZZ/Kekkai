@@ -280,7 +280,7 @@ struct Detail: View {
                         get: { !app.block.contains("clipboard") },
                         set: { v in set(["set-block", app.id, "clipboard", v ? "off" : "on"]) { e in
                             e.block = e.block.filter { $0 != "clipboard" } + (v ? [] : ["clipboard"]) } }))
-                    Toggle(t("钥匙串", "Keychain"), isOn: Binding(
+                    Toggle(t("你的钥匙串", "Your keychain"), isOn: Binding(
                         get: { !(app.options?["keychain"] ?? false) },
                         set: { v in set(["set", app.id, "keychain", v ? "off" : "on"]) { $0.options?["keychain"] = !v } }))
                     option("procinfo", t("其他进程信息", "Other processes"))
@@ -295,8 +295,8 @@ struct Detail: View {
                         Text(t("首次运行时自动开启了：\(auto.joined(separator: "、"))。不开它会启动失败。", "Turned on automatically at first launch: \(auto.joined(separator: ", ")). It failed to start without them."))
                             .foregroundStyle(.orange)
                     }
-                    Text(t("打开即允许，默认全部关闭。软件反复要求登录时打开“钥匙串”；“本机端口”指本机上其他程序开的网络服务，如代理面板、开发服务器；允许打开其他 App 后，被打开的 App 不在结界内。下次打开生效。",
-                           "On means allowed; everything is off by default. Turn on Keychain if the app keeps asking you to sign in. Ports on this Mac are network services opened by other programs here, such as proxy dashboards and dev servers. Apps it opens run outside Kekkai. Changes apply next launch."))
+                    Text(t("打开即允许，默认全部关闭。“你的钥匙串”关闭时，它用结界文件夹里自己的钥匙串，登录照样能记住，只是第一次要重新登录；“本机端口”指本机上其他程序开的网络服务，如代理面板、开发服务器；允许打开其他 App 后，被打开的 App 不在结界内。下次打开生效。",
+                           "On means allowed; everything is off by default. With Your keychain off, the app gets its own keychain in its Kekkai folder, so sign-ins are still remembered after you sign in once. Ports on this Mac are network services opened by other programs here, such as proxy dashboards and dev servers. Apps it opens run outside Kekkai. Changes apply next launch."))
                         .foregroundStyle(.secondary)
                 }
 

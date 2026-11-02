@@ -389,6 +389,11 @@ def build_profile(app, bundle_id, rule, conf, mode, groups=()):
     system = [f"(subpath {q(x)})" for x in rule.get("system_paths", [])]
     system += [f'(regex #"{x.replace("^~", "^" + re.escape(HOME))}")' for x in rule.get("system_regex", [])]
     L.append(f"(allow file-read* (subpath {q(app)}) (literal {q(str(Path(app).parent / 'libfakeloc.dylib'))}))")
+    # /usr/bin/git、clang 等只是转到 Xcode 命令行工具的壳，挡住开发工具目录它们就全失效
+    dev = subprocess.run(["/usr/bin/xcode-select", "-p"], capture_output=True, text=True).stdout.strip()
+    if dev:
+        dev = next((a for a in ancestors(dev) if a.endswith(".app")), dev)  # xcodebuild 还要读 Xcode.app 里别的框架
+        L += [f"(allow file-read-metadata {' '.join(f'(literal {q(a)})' for a in ancestors(dev))})", f"(allow file-read* (subpath {q(dev)}))"]
     if mode == "space":
         space = str(space_of(bundle_id))
         approved = allowed_dirs(conf)
@@ -396,6 +401,8 @@ def build_profile(app, bundle_id, rule, conf, mode, groups=()):
               "(allow file-read-metadata", *[f"  (literal {q(p)})" for p in sorted({*ancestors(space), *(a for p in approved for a in ancestors(p))})],
               '  (literal "/Applications") (literal "/Volumes"))',
               "(allow file-read* file-write*", f"  (subpath {q(space)})", *[f"  (subpath {q(p)})" for p in approved], *["  " + s for s in system], ")"]
+        # 打开项目时常先列出上一级找它（实测微信开发者工具），只给看名字，不给读内容
+        L += [f"(allow file-read-data (literal {q(str(Path(p).parent))}))" for p in approved]
     else:
         names = own_names(bundle_id, rule)
         # 按 ID 放行 com.tencent.qq 和 com.tencent.qq.share 这类，不放行 com.tencent.qqmusic
@@ -414,6 +421,7 @@ def build_profile(app, bundle_id, rule, conf, mode, groups=()):
               "(allow file-read-metadata", *[f"  (literal {q(p)})" for p in parents], ")",
               "(allow file-read* file-write*", *["  " + o for o in own], *["  " + x for x in extra],
               *[f"  (subpath {q(p)})" for p in approved], *["  " + s for s in system], ")",
+              *[f"(allow file-read-data (literal {q(str(Path(p).parent))}))" for p in approved],
               f"(allow file-read* (literal {q(HOME + '/.CFUserTextEncoding')}))",
               f"(allow file-read-metadata (subpath {q(HOME + '/Library/Keychains')}))"]
     if not opt(rule, conf, "block_keychain"):

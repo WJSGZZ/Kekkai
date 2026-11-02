@@ -7,6 +7,7 @@
   kekkai set-mode <bundle id> <space|real>
   kekkai set-bring-old <bundle id> <on|off>
   kekkai set-block <bundle id> clipboard <on|off>
+  kekkai allow <bundle id> add|rm <文件夹>
   kekkai set-location <bundle id> <WGS-84 纬度> <经度> [名称] | -
   kekkai never list|add|rm [路径]
 """
@@ -18,7 +19,6 @@ UID = os.getuid()
 ROOT = Path(__file__).resolve().parent
 STATE = Path(HOME, "Library/Application Support/Kekkai")
 SPACES = Path("/Users/Shared/Kekkai")
-SHARE = Path(HOME, "KekkaiShare")
 OWN_BASES = ["Application Support", "Caches", "Preferences", "Logs", "HTTPStorages", "WebKit", "Cookies",
              "Saved Application State", "Containers", "Group Containers", "Application Scripts"]
 BLOCKED = [HOME, "/Users/Shared", "/Applications", "/Volumes", "/private/tmp"]
@@ -149,6 +149,18 @@ def space_of(bundle_id):
     return SPACES / bundle_id
 
 
+def display_names(app):
+    """App 的名字（含各语言）。Electron 等软件按名字建数据文件夹，如“微信开发者工具”。"""
+    p = Path(app, "Contents")
+    found = {plistlib.load(open(p / "Info.plist", "rb")).get(k) for k in ("CFBundleName", "CFBundleDisplayName")}
+    for f in p.glob("Resources/*.lproj/InfoPlist.strings"):
+        r = subprocess.run(["plutil", "-convert", "json", "-o", "-", str(f)], capture_output=True, text=True)
+        if r.returncode == 0:
+            d = json.loads(r.stdout)
+            found |= {d.get("CFBundleName"), d.get("CFBundleDisplayName")}
+    return sorted(n for n in found if isinstance(n, str) and n.strip() and "/" not in n and n != "Electron")
+
+
 def own_names(bundle_id, rule):
     return sorted({bundle_id, *rule.get("names", [])})
 
@@ -224,39 +236,63 @@ def common_rules(rule, conf):
     return L
 
 
-def build_profile(app, bundle_id, rule, conf, mode):
+def allowed_dirs(conf):
+    return [str(Path(p).resolve()) for p in conf.get("allow", [])]
+
+
+def set_allow(bundle_id, action, path):
+    data = settings()
+    entry = data.setdefault(bundle_id, {})
+    real = str(Path(path).expanduser().resolve())
+    items = [p for p in entry.get("allow", []) if p != real]
+    entry["allow"] = items + [real] if action == "add" else items
+    save_settings(data)
+
+
+def app_groups(app):
+    return entitlements(app).get("com.apple.security.application-groups", [])
+
+
+def build_profile(app, bundle_id, rule, conf, mode, groups=()):
     L = ["(version 1)", "(allow default)", ";; 被挡的路径一律显示为不存在",
          "(deny file-read* file-write* (with errno 2)", *[f"  (subpath {q(b)})" for b in BLOCKED], ")",
          '(deny file-read-data (with errno 2) (literal "/Users"))']
     system = [f"(subpath {q(x)})" for x in rule.get("system_paths", [])]
-    L.append(f"(allow file-read* (subpath {q(app)}))")
+    system += [f'(regex #"{x.replace("^~", "^" + re.escape(HOME))}")' for x in rule.get("system_regex", [])]
+    L.append(f"(allow file-read* (subpath {q(app)}) (literal {q(str(Path(app).parent / 'libfakeloc.dylib'))}))")
     if mode == "space":
         space = str(space_of(bundle_id))
         L += [";; 所有改动都落在模拟区域",
               "(allow file-read-metadata", *[f"  (literal {q(p)})" for p in ancestors(space)],
               '  (literal "/Applications") (literal "/Volumes"))',
               "(allow file-read* file-write*", f"  (subpath {q(space)})", *["  " + s for s in system], ")"]
-        # 有的软件启动时发现旧数据目录就要授权，让这一步看到“目录不存在”
-        hide = [f"  (literal {q(os.path.join(space, x))})" for x in rule.get("space_hide_stat", [])]
-        if hide:
-            L += ["(deny file-read-metadata (with errno 2)", *hide, ")"]
     else:
         names = own_names(bundle_id, rule)
         own = [f'(regex #"^{re.escape(HOME)}/Library/([^/]+/)?{re.escape(n)}[^/]*(/.*)?$")' for n in names]
+        # 按名字只放行同名文件夹，不放行前缀相同的（如 QQ 不放行 QQMusic）
+        own += [f'(regex #"^{re.escape(HOME)}/Library/([^/]+/)?{re.escape(n)}(/.*)?$")' for n in display_names(app)]
         extra = [f"(subpath {q(os.path.join(HOME, x))})" for x in rule.get("home_paths", [])]
-        share = SHARE / Path(app).stem
-        parents = sorted({"/Users", HOME, f"{HOME}/Library", "/Applications", "/Volumes", str(SHARE),
-                          *(f"{HOME}/Library/{b}" for b in OWN_BASES)})
-        L += ["(allow file-read-metadata", *[f"  (literal {q(p)})" for p in parents], ")",
+        extra += [f"(subpath {q(f'{HOME}/Library/Group Containers/{g}')})" for g in groups]
+        approved = allowed_dirs(conf)
+        parents = sorted({"/Users", HOME, f"{HOME}/Library", "/Applications", "/Volumes",
+                          *(f"{HOME}/Library/{b}" for b in OWN_BASES), *ancestors(app),
+                          *(a for p in approved for a in ancestors(p))})
+        L += [";; 只放行它自己的数据和你批准的文件夹",
+              "(allow file-read-metadata", *[f"  (literal {q(p)})" for p in parents], ")",
               "(allow file-read* file-write*", *["  " + o for o in own], *["  " + x for x in extra],
-              f"  (subpath {q(str(share))})", *["  " + s for s in system], ")",
-              f"(allow file-read* (literal {q(HOME + '/.CFUserTextEncoding')}))",
+              *[f"  (subpath {q(p)})" for p in approved], *["  " + s for s in system], ")",
+              f"(allow file-read* (literal {q(HOME + '/.CFUserTextEncoding')})",
+              f"  (subpath {q(HOME + '/Library/Input Methods')}) (subpath {q(HOME + '/Library/Keyboard Layouts')}))",
               f"(allow file-read-metadata (subpath {q(HOME + '/Library/Keychains')}))"]
+    # 模拟区域里没有旧数据，有的软件发现空的旧数据目录就要授权，让这一步看到“目录不存在”
+    hide = [f"  (literal {q(os.path.join(space_of(bundle_id), x))})" for x in rule.get("space_hide_stat", []) if mode == "space"]
+    if hide:
+        L += ["(deny file-read-metadata (with errno 2)", *hide, ")"]
     return "\n".join(L + common_rules(rule, conf) + never_rules()) + "\n"
 
 
 def effective_mode(bundle_id, conf, rule):
-    return conf.get("mode", "space")
+    return conf.get("mode", "real")  # 模拟区域只留给命令行
 
 
 def label(bundle_id):
@@ -310,7 +346,7 @@ def resign(bundle):
 def local_copy(app, bundle_id):
     """在模拟区域里放一份 APFS 克隆，去掉苹果沙盒和强化运行时后重签，原 App 不动。
     自带苹果沙盒的 App 再套一层会崩溃；虚拟定位要注入，也要用副本。"""
-    seed_space(bundle_id, {})
+    SPACES.mkdir(parents=True, exist_ok=True)
     dst = space_of(bundle_id) / "Applications" / Path(app).name
     stamp = dst.parent / (Path(app).name + ".source")
     src_id = str(Path(app, "Contents/Info.plist").stat().st_mtime)
@@ -337,12 +373,13 @@ def run(app, learn=False):
     sandboxed = bool(entitlements(app).get("com.apple.security.app-sandbox"))
     rule, conf = load_rule(bundle_id), settings().get(bundle_id, {})
     fake = conf.get("location")
+    groups = app_groups(app)
     if sandboxed or fake:  # 虚拟定位要注入，原版的强化运行时不允许，也用副本
         app = local_copy(app, bundle_id)
     binary = f"{app}/Contents/MacOS/{exe}"
     if subprocess.run(["pgrep", "-f", "^" + re.escape(binary)], capture_output=True).returncode == 0:
         return t(f"{Path(app).stem} 已在运行。请先完全退出，再放进结界。", f"{Path(app).stem} is already running. Quit it completely first.")
-    mode = "space" if sandboxed or fake else effective_mode(bundle_id, conf, rule)
+    mode = effective_mode(bundle_id, conf, rule)
     STATE.mkdir(parents=True, exist_ok=True)
     env = {"TZ": conf["tz"]} if conf.get("tz") else {}
     cwd = "/"
@@ -352,7 +389,7 @@ def run(app, learn=False):
         stamp = subprocess.run(["date", "+%Y-%m-%d %H:%M:%S"], capture_output=True, text=True).stdout.strip()
         (STATE / f"{bundle_id}.learn-start").write_text(stamp)
     else:
-        sb.write_text(build_profile(app, bundle_id, rule, conf, mode))
+        sb.write_text(build_profile(app, bundle_id, rule, conf, mode, groups))
         if mode == "space":
             seed_space(bundle_id, rule)
             space = str(space_of(bundle_id))
@@ -360,13 +397,16 @@ def run(app, learn=False):
             env.update(HOME=space, CFFIXED_USER_HOME=space, TMPDIR=space + "/tmp/")
             if not rule.get("keep_prefs_service"):
                 env["__CFPREFERENCES_AVOID_DAEMON"] = "1"  # 偏好设置直接读写模拟区域，不经系统服务
-        else:
-            cwd = str(SHARE / Path(app).stem)
-            Path(cwd).mkdir(parents=True, exist_ok=True)
+        elif sandboxed:
+            # 副本没有苹果沙盒，让它把原来的容器当家目录，读写的就是原来那份数据
+            home = Path(HOME, "Library/Containers", bundle_id, "Data")
+            (home / "Library/Preferences").mkdir(parents=True, exist_ok=True)
+            cwd = str(home)
+            env.update(HOME=cwd, CFFIXED_USER_HOME=cwd, __CFPREFERENCES_AVOID_DAEMON="1")
         if not rule.get("keep_username"):
             env.update(USER="user", LOGNAME="user")
     if fake:
-        lib = space_of(bundle_id) / ".kekkai" / "libfakeloc.dylib"
+        lib = Path(app).parent / "libfakeloc.dylib"  # 放在副本旁边，规则已放行
         lib.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(ROOT / "libfakeloc.dylib", lib)
         env.update(KEKKAI_LAT=str(fake["lat"]), KEKKAI_LON=str(fake["lon"]))
@@ -425,7 +465,7 @@ def list_apps():
             out.append({"id": bundle_id, "name": app.stem, "path": str(app), "sandboxed": cache[key]["sandboxed"],
                         "perms": [t(PERMISSIONS[k], PERMISSIONS_EN[k]) for k in cache[key]["perm_keys"]], "inside": inside, "running": f"{app}/Contents/MacOS/{exe}" in procs,
                         "tz": c.get("tz"), "mode": effective_mode(bundle_id, c, load_rule(bundle_id)),
-                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c), "location": c.get("location"), "space": str(space), "hasSpace": space.exists()})
+                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c), "location": c.get("location"), "allow": c.get("allow", []), "space": str(space), "hasSpace": space.exists()})
     STATE.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(cache))
     print(json.dumps(out, ensure_ascii=False))
@@ -441,6 +481,8 @@ def main():
         return set_field(a[1], "mode", a[2])
     if len(a) == 3 and a[0] == "set-bring-old" and a[2] in ("on", "off"):
         return set_field(a[1], "bring_old_data", True if a[2] == "on" else "-")
+    if len(a) == 4 and a[0] == "allow" and a[2] in ("add", "rm"):
+        return set_allow(a[1], a[2], a[3])
     if a[:1] == ["set-location"] and (a[2:] == ["-"] or len(a) >= 4):
         return set_location(a[1], a[2:])
     if len(a) == 4 and a[0] == "set-block" and a[2] in DEVICES and a[3] in ("on", "off"):

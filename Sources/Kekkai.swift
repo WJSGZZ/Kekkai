@@ -55,6 +55,7 @@ struct AppEntry: Codable, Identifiable, Equatable {
     var block: [String]
     var location: Place?
     var mode: String
+    var allow: [String]
     let space: String
 }
 
@@ -154,7 +155,6 @@ struct Detail: View {
     let app: AppEntry
     @ObservedObject var store: Store
     let now: Date
-    @State private var confirmReset = false
     @State private var picking = false
 
     var status: (String, Color) {
@@ -201,30 +201,31 @@ struct Detail: View {
             header
             Form {
                 Section {
-                    if app.sandboxed {
-                        LabeledContent(t("运行方式", "How it runs"), value: t("去掉苹果沙盒的副本", "Unsandboxed copy"))
-                    } else {
-                        Picker(t("存放改动", "Save changes to"), selection: Binding(
-                            get: { app.mode },
-                            set: { v in set(["set-mode", app.id, v]) { $0.mode = v } })) {
-                            Text(t("模拟区域", "Private space")).tag("space")
-                            Text(t("真实文件", "Real files")).tag("real")
-                        }
-                        .pickerStyle(.segmented)
-                        if app.mode == "space" {
-                            Toggle(t("首次打开时带入旧数据", "Bring existing data on first launch"), isOn: Binding(
-                                get: { app.bringOld },
-                                set: { v in set(["set-bring-old", app.id, v ? "on" : "off"]) { $0.bringOld = v } }))
-                                .disabled(app.hasSpace)
+                    if app.allow.isEmpty {
+                        Text(t("没有。它只看得到自己的数据。", "None. It can only see its own data.")).foregroundStyle(.secondary)
+                    }
+                    ForEach(app.allow, id: \.self) { p in
+                        HStack {
+                            Image(systemName: "folder")
+                            Text((p as NSString).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.middle)
+                            Spacer()
+                            Button(t("移除", "Remove")) { set(["allow", app.id, "rm", p]) { $0.allow.removeAll { $0 == p } } }
                         }
                     }
-                } header: { Text(t("数据", "Data")) } footer: {
+                    Button(t("批准一个文件夹…", "Allow a Folder…")) {
+                        let panel = NSOpenPanel()
+                        panel.canChooseDirectories = true
+                        panel.canChooseFiles = false
+                        panel.canCreateDirectories = true
+                        panel.prompt = t("批准", "Allow")
+                        if panel.runModal() == .OK, let p = panel.url?.path {
+                            set(["allow", app.id, "add", p]) { $0.allow.append(p) }
+                        }
+                    }
+                } header: { Text(t("允许访问的文件夹", "Allowed folders")) } footer: {
                     Text(app.sandboxed
-                         ? t("它自带苹果沙盒，不能再套一层。结界在模拟区域里放一份去掉苹果沙盒的副本来运行，原 App 和数据不动。副本要重新登录，原 App 更新后会自动重建。", "It already has Apple's sandbox, which can't be stacked. Kekkai runs an unsandboxed copy from the private space and leaves the original and its data alone. You'll sign in again, and the copy is rebuilt when the original updates.")
-                         : app.mode == "real" ? t("改动直接写进它原来的数据，只放行它自己的文件。", "Changes go straight into its existing data. Only its own files are allowed.")
-                         : app.hasSpace ? t("模拟区域已建好，想重来可以丢弃所有改动。", "The private space already exists. Discard all changes to start over.")
-                         : app.bringOld ? t("首次打开时克隆它原有的数据，登录可能保留。", "Clones its existing data on first launch, so you may stay signed in.")
-                         : t("当作新软件使用，不带任何旧数据，需要重新登录。", "Starts as a new app with no old data. You'll sign in again."))
+                         ? t("它照常用自己原来的数据，别的文件一律看不到。它自带苹果沙盒，结界会用一份去掉苹果沙盒的副本运行，原 App 不动；副本签名不同，可能要重新登录一次。", "It keeps using its own data and can't see anything else. Because it already has Apple's sandbox, Kekkai runs an unsandboxed copy and leaves the original alone. The copy is signed differently, so you may need to sign in once.")
+                         : t("它照常用自己原来的数据，别的文件一律看不到，包括下载、桌面和文稿。要存下载的文件时，批准一个文件夹给它。", "It keeps using its own data and can't see anything else, including Downloads, Desktop and Documents. If it needs to save downloads, allow a folder here."))
                         .foregroundStyle(.secondary)
                 }
 
@@ -268,17 +269,7 @@ struct Detail: View {
                         Button(t("学习模式（不隔离）", "Learn Mode (No Isolation)")) { store.perform(["learn", app.path]) }
                             .disabled(app.running || app.inside)
                         Button(t("访问记录", "Access Log")) { store.showReport(path: app.path) }
-                        Button(t("交换文件夹", "Exchange Folder")) {
-                            let path = app.mode == "space" || app.sandboxed ? app.space + "/Downloads" : NSHomeDirectory() + "/KekkaiShare/" + app.name
-                            let url = URL(fileURLWithPath: path)
-                            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-                            NSWorkspace.shared.open(url)
-                        }
                         Spacer()
-                        if app.hasSpace {
-                            Button(t("丢弃所有改动…", "Discard All Changes…"), role: .destructive) { confirmReset = true }
-                                .disabled(app.inside)
-                        }
                     }
                 }
             }
@@ -289,10 +280,6 @@ struct Detail: View {
                     store.perform(place.map { ["set-location", app.id, String($0.lat), String($0.lon), $0.mars == true ? "--mars" : "--wgs", $0.name] } ?? ["set-location", app.id, "-"])
                 }
             }
-            .confirmationDialog(t("丢弃 \(displayName(app)) 在模拟区域里的所有改动？", "Discard all of \(displayName(app))'s changes in its private space?"), isPresented: $confirmReset) {
-                Button(t("丢弃", "Discard"), role: .destructive) { store.perform(["reset", app.path]) }
-                Button(t("取消", "Cancel"), role: .cancel) {}
-            } message: { Text(t("包括放在交换文件夹里的文件，不能恢复。下次打开时回到初始状态。", "This includes files in the exchange folder and can't be undone. The app starts fresh next time.")) }
         }
     }
 }
@@ -444,7 +431,7 @@ struct ContentView: View {
                 } else {
                     VStack(spacing: 8) {
                         Text(t("选一个 App，或把 App 拖到这里", "Choose an app, or drag one here")).font(.title3)
-                        Text(t("结界里的软件只看得到自己的文件", "Apps in Kekkai can only see their own files")).foregroundStyle(.secondary)
+                        Text(t("结界里的软件只看得到自己的数据", "Apps in Kekkai can only see their own files")).foregroundStyle(.secondary)
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }

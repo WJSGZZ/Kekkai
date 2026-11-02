@@ -18,6 +18,12 @@ from pathlib import Path
 
 HOME = str(Path.home())
 UID = os.getuid()
+# 所有软件共用的临时和缓存文件夹，里面有别的软件的文件
+USER_TEMP = os.path.realpath(subprocess.run(["getconf", "DARWIN_USER_TEMP_DIR"], capture_output=True, text=True).stdout.strip())
+USER_CACHE = os.path.realpath(subprocess.run(["getconf", "DARWIN_USER_CACHE_DIR"], capture_output=True, text=True).stdout.strip())
+# 列出内容就能看出装了什么的系统文件夹（只挡列目录，不挡按名字访问）
+NO_LIST = ["/Library/Application Support", "/Library/Preferences", "/Library/LaunchAgents", "/Library/LaunchDaemons",
+           "/Library/PrivilegedHelperTools", "/Library/Extensions", "/opt", "/usr/local"]
 ROOT = Path(__file__).resolve().parent
 STATE = Path(HOME, "Library/Application Support/Kekkai")
 SPACES = Path("/Users/Shared/Kekkai")
@@ -277,6 +283,16 @@ def build_profile(app, bundle_id, rule, conf, mode, groups=()):
     L = ["(version 1)", "(allow default)", ";; 被挡的路径一律显示为不存在",
          "(deny file-read* file-write* (with errno 2)", *[f"  (subpath {q(b)})" for b in BLOCKED], ")",
          '(deny file-read-data (with errno 2) (literal "/Users"))']
+    if not rule.get("shared_tmp"):
+        # 共用临时、缓存文件夹只放行系统的和它自己的条目；临时文件改放它自己的文件夹
+        mine = "|".join(re.escape(n) for n in [*own_names(bundle_id, rule), *nested_ids(app), "com.apple."])
+        L += ["(deny file-read* file-write* (with errno 2)", f"  (subpath {q(USER_TEMP)}) (subpath {q(USER_CACHE)}))",
+              *[f'(allow file-read* file-write* (regex #"^{re.escape(d)}/\\.?({mine})[^/]*(/.*)?$"))' for d in (USER_TEMP, USER_CACHE)],
+              f"(allow file-read-metadata (literal {q(USER_TEMP)}) (literal {q(USER_CACHE)}) (literal {q(USER_TEMP + '/TemporaryItems')}))"]
+        # 系统安全替换文件时建的临时文件夹，以软件显示名命名
+        shown = "|".join(re.escape(n) for n in [*display_names(app), *own_names(bundle_id, rule)])
+        L.append(f'(allow file-read* file-write* (regex #"^{re.escape(USER_TEMP)}/TemporaryItems/NSIRD_({shown})_[^/]+(/.*)?$"))')
+    L += ["(deny file-read-data (with errno 2)", *[f"  (literal {q(p)})" for p in NO_LIST], ")"]
     system = [f"(subpath {q(x)})" for x in rule.get("system_paths", [])]
     system += [f'(regex #"{x.replace("^~", "^" + re.escape(HOME))}")' for x in rule.get("system_regex", [])]
     L.append(f"(allow file-read* (subpath {q(app)}) (literal {q(str(Path(app).parent / 'libfakeloc.dylib'))}))")
@@ -628,11 +644,15 @@ def run(app, learn=False):
             seed_space(bundle_id, rule)
             space = str(space_of(bundle_id))
             cwd = space
-            env.update(HOME=space, CFFIXED_USER_HOME=space, TMPDIR=space + "/tmp/")
+            env.update(HOME=space, CFFIXED_USER_HOME=space, TMPDIR=space + "/tmp/", MAC_CHROMIUM_TMPDIR=space + "/tmp/")
             if not rule.get("keep_prefs_service"):
                 env["__CFPREFERENCES_AVOID_DAEMON"] = "1"  # 偏好设置直接读写模拟区域，不经系统服务
         if not rule.get("keep_username"):
             env.update(USER="user", LOGNAME="user")
+    if not learn and not rule.get("shared_tmp") and mode != "space":
+        tmp = Path(HOME, "Library/Caches", bundle_id, "kekkai-tmp")  # 在它自己的文件夹里
+        tmp.mkdir(parents=True, exist_ok=True)
+        env["TMPDIR"] = env["MAC_CHROMIUM_TMPDIR"] = str(tmp) + "/"  # Chromium 内核不认 TMPDIR
     if fake:
         lib = Path(app).parent / "libfakeloc.dylib"  # 放在副本旁边，规则已放行
         lib.parent.mkdir(parents=True, exist_ok=True)

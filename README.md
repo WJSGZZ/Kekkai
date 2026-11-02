@@ -26,10 +26,12 @@ cd Kekkai
 
 Open `~/Applications/Kekkai.app`, pick an app from the list (or drag one onto the window), and click **Open in Kekkai**.
 
-Quit the app completely before opening it from Kekkai. Copies launched## Features
+Quit the app completely before opening it from Kekkai. Copies launched from their own icon or from a web link aren't restricted.
 
-- **Only its own data.** The app reads and writes its own folders in `~/Library`. Everything else gets "no such file", not "permission denied". That includes Downloads, Desktop, Documents, external drives and other apps' data. Its folders are found three ways: the bundle IDs of the app and its bundled helpers and extensions (`com.tencent.qq` and `com.tencent.qq.share` count, `com.tencent.qqmusic` doesn't), the group containers it declares, and folders in the usual data locations named exactly after the app (such as 微信开发者工具).
-- **No peeking at your other apps.** `/Applications` can't be listed, asking macOS where an app is installed returns nothing, Spotlight returns none of your files, and other processes are hidden.
+## Features
+
+- **Only its own data.** The app reads and writes its own folders in `~/Library`. Everything else gets "no such file", not "permission denied". That includes Downloads, Desktop, Documents, external drives and other apps' data. In the temp and cache folders every app shares, it sees only its own entries, and its temporary files go into its own folder instead. Its folders are found three ways: the bundle IDs of the app and its bundled helpers and extensions (`com.tencent.qq` and `com.tencent.qq.share` count, `com.tencent.qqmusic` doesn't), the group containers it declares, and folders in the usual data locations named exactly after the app (such as 微信开发者工具).
+- **No peeking at your other apps.** System folders such as `/Applications` and `/Library/Application Support` can't be listed, asking macOS where an app is installed returns nothing, Spotlight returns none of your files, and other processes are hidden.
 - **Folders on request.** If the app needs somewhere to save downloads, allow a folder for it on the detail page. You can remove it any time.
 - **Always-blocked folders.** These override every allowed folder, apply in Learn Mode too, and can't be reached through symlinks. The defaults are `~/.ssh`, `~/.gnupg` and `~/.aws`.
 - **Hidden user name.** The app sees the user name `user`.
@@ -50,8 +52,8 @@ Tested on macOS 27.2:
 |---|---|
 | Baidu Netdisk | Starts on its existing data, stays signed in and fetches its file list. Downloads, Desktop and Documents are hidden, and an allowed folder can be read and written |
 | Tencent Meeting | Starts on its existing data. Its Block Log shows that at launch it checks for Chrome, ChatGPT and a test copy of Chrome in `~/.cache`, all blocked |
-| WeChat DevTools | Starts on its existing data |
-| QQ, WeChat | The unsandboxed copy reaches the QR sign-in screen, and the trial run shows no errors. The copy keeps its own data (see below) |
+| WeChat DevTools | Starts on its existing data, and the trial run shows no errors |
+| QQ, WeChat | The unsandboxed copy reaches the QR sign-in screen, and the trial run shows no errors. At launch WeChat tries to list the shared temp and cache folders and is blocked. The copy keeps its own data (see below) |
 
 With the clipboard blocked, the app can't reach the clipboard service at all. This goes further than macOS's own Paste from Other Apps setting, which only asks before an app reads the clipboard on its own.
 
@@ -64,8 +66,6 @@ Wrapped directly, these apps crash at launch inside macOS's own sandbox setup, h
 - The copy is signed differently, so you'll grant camera and microphone access again.
 - The original and the copy each keep their own chat history. The copy only has what syncs from the cloud after you sign in.
 - Without Apple's sandbox, the copy is limited only by Kekkai's rules.
-
-ple's sandbox, the copy is limited only by Kekkai's rules.
 
 ## Compared with Apple's App Sandbox
 
@@ -94,7 +94,7 @@ kekkai set-location <bundle id> <latitude> <longitude> [name] | -
 kekkai never list|add|rm [path]
 ```
 
-A few apps need extra rules, which live in `rules/<bundle id>.json`. For example, Tencent Meeting creates lock files with random hex names in `/tmp` and in the home folder, and its `system_regex` allows only names like that.
+A few apps need extra rules, which live in `rules/<bundle id>.json`. For example, Tencent Meeting creates lock files with random hex names in `/tmp` and in the home folder, and its `system_regex` allows only names like that. An app that really needs the shared temp folders can be given `"shared_tmp": true`.
 
 The command line also keeps a disposable private space (`set-mode <bundle id> space`), where the app starts from scratch in its own home folder. It's handy for trying an app you don't trust yet.
 

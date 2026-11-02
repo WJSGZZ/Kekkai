@@ -16,4 +16,4 @@ printf 'CFBundleName = "Kekkai";\nCFBundleDisplayName = "Kekkai";\n' > "$app/Con
 printf 'CFBundleName = "结界";\nCFBundleDisplayName = "结界";\n' > "$app/Contents/Resources/zh-Hans.lproj/InfoPlist.strings"
 codesign -f -s - "$app"
 # 聚焦在文件还没放齐时就收录了，记成英文名，中文搜“结界”搜不到；装完让它重新收录
-mdimport "$app" 2>/dev/null || true; echo "Installed / 已安装：$app"
+mdimport "$app" || echo "聚焦收录失败，可稍后自行搜索"; echo "Installed / 已安装：$app"

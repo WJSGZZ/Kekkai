@@ -44,7 +44,7 @@ DEFAULT_NEVER = [f"{HOME}/.ssh", f"{HOME}/.gnupg", f"{HOME}/.aws"]
 DEVICES = {
     "clipboard": ['(deny mach-lookup (global-name "com.apple.pasteboard.1"))'],
 }
-DEFAULT_BLOCK = []
+DEFAULT_BLOCK = ["clipboard"]  # 默认全部最严
 NAME_BASES = ["Application Support", "Caches", "Logs", "HTTPStorages", "WebKit", "Saved Application State"]
 SPACE_DIRS = ["Library/Application Support", "Library/Caches", "Library/Preferences", "Library/Logs",
               "Downloads", "Documents", "Desktop", "tmp"]
@@ -131,8 +131,11 @@ def set_field(bundle_id, key, value):
 OPTIONS = {"localhost": "allow_localhost", "procinfo": "allow_procinfo", "keychain": "block_keychain"}
 
 
+OPTION_DEFAULTS = {"block_keychain": True}  # 默认全部最严
+
+
 def opt(rule, conf, key):
-    return bool(conf[key]) if key in conf else bool(rule.get(key))
+    return bool(conf[key]) if key in conf else bool(rule.get(key, OPTION_DEFAULTS.get(key, False)))
 
 
 def set_tz(bundle_id, tz):

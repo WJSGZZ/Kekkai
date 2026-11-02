@@ -37,6 +37,7 @@ Quit the app completely before opening it from Kekkai. Copies launched from thei
 - **Always-blocked folders.** These override every other rule, apply in Learn Mode too, and can't be reached through symlinks. The defaults are `~/.ssh`, `~/.gnupg` and `~/.aws`.
 - **Learn Mode.** Run an app once without isolation to log which outside paths it touches, then decide what to allow.
 - **Per-app time zone.** Each app can show its own time zone.
+- **Virtual location.** Search for a place or click the map, and that's the location the app gets whenever it asks macOS. There's no permission prompt, and the real location never reaches the app. In mainland China, the map's GCJ-02 coordinates are converted to the GPS (WGS-84) coordinates apps expect. The app runs as a copy while this is on. Apps that work out your location from your IP address need a proxy instead.
 - **Exchange folder.** Use **Open Exchange Folder** to pass files in and out.
 
 The interface follows your system language (English or Chinese).
@@ -75,6 +76,7 @@ kekkai set-tz <bundle id> <time zone|->
 kekkai set-mode <bundle id> <space|real>
 kekkai set-bring-old <bundle id> <on|off>
 kekkai set-block <bundle id> clipboard <on|off>
+kekkai set-location <bundle id> <latitude> <longitude> [name] | -
 kekkai never list|add|rm [path]
 ```
 
@@ -84,6 +86,7 @@ A few apps need extra rules, which live in `rules/<bundle id>.json`. For example
 
 - Kekkai can't hide itself completely. An app can tell it's sandboxed, and the user ID is real.
 - Only the time zone changes, not the clock. An app can still work out your location from your IP address or server time.
+- A virtual location only replaces the macOS location API. An app that scans nearby Wi-Fi or uses your IP address may still find your real location.
 - Network access isn't restricted.
 - The keychain works as normal. The `block_keychain` rule blocks it, but sign-ins that rely on the keychain may then fail.
 - Preferences in group containers are still written to the real location.

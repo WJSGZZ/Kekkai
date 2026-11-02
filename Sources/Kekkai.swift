@@ -1,10 +1,50 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import Combine
+import MapKit
 
 let isChinese = Locale.preferredLanguages.first?.hasPrefix("zh") ?? false
 func t(_ zh: String, _ en: String) -> String { isChinese ? zh : en }
 func displayName(_ app: AppEntry) -> String { (FileManager.default.displayName(atPath: app.path) as NSString).deletingPathExtension }
+
+// 中国大陆的地图用 GCJ-02（“火星坐标”），软件从系统拿到的定位是 GPS 用的 WGS-84，相差约几百米
+enum Mars {
+    static let a = 6378245.0, ee = 0.00669342162296594323
+    static func offset(_ lat: Double, _ lon: Double) -> (Double, Double) {
+        let x = lon - 105, y = lat - 35
+        var dLat = -100 + 2 * x + 3 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * sqrt(abs(x))
+        dLat += (20 * sin(6 * x * .pi) + 20 * sin(2 * x * .pi)) * 2 / 3
+        dLat += (20 * sin(y * .pi) + 40 * sin(y / 3 * .pi)) * 2 / 3
+        dLat += (160 * sin(y / 12 * .pi) + 320 * sin(y * .pi / 30)) * 2 / 3
+        var dLon = 300 + x + 2 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * sqrt(abs(x))
+        dLon += (20 * sin(6 * x * .pi) + 20 * sin(2 * x * .pi)) * 2 / 3
+        dLon += (20 * sin(x * .pi) + 40 * sin(x / 3 * .pi)) * 2 / 3
+        dLon += (150 * sin(x / 12 * .pi) + 300 * sin(x / 30 * .pi)) * 2 / 3
+        let rad = lat / 180 * .pi, m = 1 - ee * sin(rad) * sin(rad), s = sqrt(m)
+        return (dLat * 180 / ((a * (1 - ee)) / (m * s) * .pi), dLon * 180 / (a / s * cos(rad) * .pi))
+    }
+    static func fromWGS(_ c: CLLocationCoordinate2D) -> CLLocationCoordinate2D {
+        let d = offset(c.latitude, c.longitude)
+        return .init(latitude: c.latitude + d.0, longitude: c.longitude + d.1)
+    }
+    static func toWGS(_ c: CLLocationCoordinate2D) -> CLLocationCoordinate2D {
+        var g = c
+        for _ in 0..<5 {
+            let m = fromWGS(g)
+            g = .init(latitude: g.latitude + c.latitude - m.latitude, longitude: g.longitude + c.longitude - m.longitude)
+        }
+        return g
+    }
+}
+
+// lat／lon 是注入给软件的 WGS-84；mars 表示选点时在中国大陆，地图上要换回 GCJ-02 显示
+struct Place: Codable, Equatable {
+    var lat, lon: Double
+    var name: String
+    var mars: Bool?
+    var coordinate: CLLocationCoordinate2D { .init(latitude: lat, longitude: lon) }
+    var mapCoordinate: CLLocationCoordinate2D { mars == true ? Mars.fromWGS(coordinate) : coordinate }
+}
 
 struct AppEntry: Codable, Identifiable, Equatable {
     let id, name, path: String
@@ -13,6 +53,7 @@ struct AppEntry: Codable, Identifiable, Equatable {
     var tz: String?
     let perms: [String]
     var block: [String]
+    var location: Place?
     var mode: String
     let space: String
 }
@@ -114,6 +155,7 @@ struct Detail: View {
     @ObservedObject var store: Store
     let now: Date
     @State private var confirmReset = false
+    @State private var picking = false
 
     var status: (String, Color) {
         if app.inside { return (t("在结界中运行", "Running in Kekkai"), .green) }
@@ -198,8 +240,15 @@ struct Detail: View {
                         ForEach(presetZones, id: \.1) { Text($0.0).tag($0.1) }
                         if let tz = app.tz, !presetZones.contains(where: { $0.1 == tz }) { Text(tz).tag(tz) }
                     }
+                    LabeledContent(t("虚拟位置", "Virtual location")) {
+                        HStack {
+                            Text(app.location.map { $0.name.isEmpty ? String(format: "%.4f, %.4f", $0.lat, $0.lon) : $0.name } ?? t("关", "Off"))
+                                .foregroundStyle(.secondary).lineLimit(1)
+                            Button(t("选择…", "Choose…")) { picking = true }
+                        }
+                    }
                 } header: { Text(t("隔离", "Isolation")) } footer: {
-                    Text(t("结界内显示 \(clock(app.tz))。剪贴板关掉后复制、粘贴都不能用。设置会记住，下次打开生效。", "Shows \(clock(app.tz)) inside. With the clipboard blocked, copy and paste stop working. Settings are saved and apply next launch."))
+                    Text(t("结界内显示 \(clock(app.tz))。剪贴板关掉后复制、粘贴都不能用。虚拟位置只骗过向系统要定位的软件，按 IP 判断位置的骗不过；开启后会用副本运行。设置会记住，下次打开生效。", "Shows \(clock(app.tz)) inside. With the clipboard blocked, copy and paste stop working. A virtual location fools apps that ask macOS for your location, not ones that use your IP address, and the app runs as a copy. Settings are saved and apply next launch."))
                         .foregroundStyle(.secondary)
                 }
 
@@ -234,10 +283,97 @@ struct Detail: View {
                 }
             }
             .formStyle(.grouped)
+            .sheet(isPresented: $picking) {
+                LocationPicker(current: app.location) { place in
+                    store.update(app.id) { $0.location = place }
+                    store.perform(place.map { ["set-location", app.id, String($0.lat), String($0.lon), $0.mars == true ? "--mars" : "--wgs", $0.name] } ?? ["set-location", app.id, "-"])
+                }
+            }
             .confirmationDialog(t("丢弃 \(displayName(app)) 在模拟区域里的所有改动？", "Discard all of \(displayName(app))'s changes in its private space?"), isPresented: $confirmReset) {
                 Button(t("丢弃", "Discard"), role: .destructive) { store.perform(["reset", app.path]) }
                 Button(t("取消", "Cancel"), role: .cancel) {}
             } message: { Text(t("包括放在交换文件夹里的文件，不能恢复。下次打开时回到初始状态。", "This includes files in the exchange folder and can't be undone. The app starts fresh next time.")) }
+        }
+    }
+}
+
+struct LocationPicker: View {
+    let current: Place?
+    let done: (Place?) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var position: MapCameraPosition = .automatic
+    @State private var pin: Place?  // 存地图坐标，确定时再换算
+    @State private var resolving = false
+    @State private var query = ""
+    @State private var results: [MKMapItem] = []
+
+    func search() {
+        let request = MKLocalSearch.Request()
+        request.naturalLanguageQuery = query
+        MKLocalSearch(request: request).start { r, _ in results = r?.mapItems ?? [] }
+    }
+    func use() {
+        guard let p = pin else { return }
+        resolving = true
+        CLGeocoder().reverseGeocodeLocation(CLLocation(latitude: p.lat, longitude: p.lon)) { marks, _ in
+            let china = marks?.first?.isoCountryCode == "CN"
+            let w = china ? Mars.toWGS(p.coordinate) : p.coordinate
+            done(Place(lat: w.latitude, lon: w.longitude, name: p.name, mars: china))
+            dismiss()
+        }
+    }
+    func choose(_ item: MKMapItem) {
+        let c = item.location.coordinate
+        pin = Place(lat: c.latitude, lon: c.longitude, name: item.name ?? "")
+        position = .region(MKCoordinateRegion(center: c, latitudinalMeters: 2000, longitudinalMeters: 2000))
+        results = []
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                TextField(t("搜索地点", "Search for a place"), text: $query).textFieldStyle(.roundedBorder).onSubmit(search)
+                Button(t("搜索", "Search"), action: search)
+            }
+            .padding(12)
+            ZStack(alignment: .top) {
+                MapReader { proxy in
+                    Map(position: $position) {
+                        if let pin { Marker(pin.name, coordinate: pin.coordinate) }
+                    }
+                    .onTapGesture { p in
+                        if let c = proxy.convert(p, from: .local) {
+                            pin = Place(lat: c.latitude, lon: c.longitude, name: String(format: "%.4f, %.4f", c.latitude, c.longitude))
+                        }
+                    }
+                }
+                if !results.isEmpty {
+                    List(results, id: \.self) { item in
+                        Button { choose(item) } label: {
+                            VStack(alignment: .leading) {
+                                Text(item.name ?? "")
+                                Text(item.address?.shortAddress ?? "").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .frame(maxHeight: 220).clipShape(RoundedRectangle(cornerRadius: 8)).padding(10)
+                }
+            }
+            HStack {
+                Text(pin.map { $0.name } ?? t("搜索地点，或在地图上点一下", "Search for a place, or click the map")).foregroundStyle(.secondary).lineLimit(1)
+                Spacer()
+                if current != nil { Button(t("关闭虚拟位置", "Turn Off")) { done(nil); dismiss() } }
+                Button(t("取消", "Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
+                Button(t("使用这个位置", "Use This Location"), action: use)
+                    .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent).disabled(pin == nil || resolving)
+            }
+            .padding(12)
+        }
+        .frame(width: 640, height: 520)
+        .onAppear {
+            pin = current.map { Place(lat: $0.mapCoordinate.latitude, lon: $0.mapCoordinate.longitude, name: $0.name) }
+            if let c = current?.mapCoordinate { position = .region(MKCoordinateRegion(center: c, latitudinalMeters: 3000, longitudinalMeters: 3000)) }
         }
     }
 }

@@ -6,7 +6,7 @@
   kekkai set-tz <bundle id> <时区|->
   kekkai set-mode <bundle id> <space|real>
   kekkai set-bring-old <bundle id> <on|off>
-  kekkai set-block <bundle id> <camera|microphone|clipboard|location> <on|off>
+  kekkai set-block <bundle id> clipboard <on|off>
   kekkai never list|add|rm [路径]
 """
 import json, os, plistlib, re, shutil, subprocess, sys
@@ -25,14 +25,11 @@ NO_EXEC = ["/bin/launchctl", "/usr/bin/open", "/usr/bin/osascript"]
 DIRECTORY_SERVICES = ["com.apple.system.opendirectoryd.libinfo", "com.apple.system.opendirectoryd.api",
                       "com.apple.system.opendirectoryd.membership", "com.apple.system.DirectoryService.libinfo_v1"]
 DEFAULT_NEVER = [f"{HOME}/.ssh", f"{HOME}/.gnupg", f"{HOME}/.aws"]
-# 可按 App 关掉的设备和服务；定位默认关
+# 可按 App 关掉的服务。摄像头、麦克风、定位由系统按软件管理，不在这里重复
 DEVICES = {
-    "camera": ["(deny device-camera)"],
-    "microphone": ["(deny device-microphone)"],
     "clipboard": ['(deny mach-lookup (global-name "com.apple.pasteboard.1"))'],
-    "location": ['(deny mach-lookup (global-name-regex #"^com\\.apple\\.locationd\\."))'],
 }
-DEFAULT_BLOCK = ["location"]
+DEFAULT_BLOCK = []
 SPACE_DIRS = ["Library/Application Support", "Library/Caches", "Library/Preferences", "Library/Logs",
               "Downloads", "Documents", "Desktop", "tmp"]
 PERMISSIONS_EN = {

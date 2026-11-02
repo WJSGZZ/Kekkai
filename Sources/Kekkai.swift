@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import Combine
 
 let isChinese = Locale.preferredLanguages.first?.hasPrefix("zh") ?? false
 func t(_ zh: String, _ en: String) -> String { isChinese ? zh : en }
@@ -7,11 +8,13 @@ func displayName(_ app: AppEntry) -> String { (FileManager.default.displayName(a
 
 struct AppEntry: Codable, Identifiable, Equatable {
     let id, name, path: String
-    let sandboxed, inside, running, hasSpace, bringOld: Bool
-    let tz: String?
+    let sandboxed, inside, running, hasSpace: Bool
+    var bringOld: Bool
+    var tz: String?
     let perms: [String]
-    let block: [String]
-    let mode, space: String
+    var block: [String]
+    var mode: String
+    let space: String
 }
 
 enum CLI {
@@ -65,6 +68,10 @@ final class Store: ObservableObject {
         }
     }
 
+    func update(_ id: String, _ change: (inout AppEntry) -> Void) {
+        if let i = apps.firstIndex(where: { $0.id == id }) { change(&apps[i]) }
+    }
+
     func open(path: String) { perform(["run", path]) }
 
     func loadNever(_ args: [String] = ["never", "list"]) {
@@ -92,11 +99,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
 
-let devices: [(String, String)] = [
-    ("camera", t("摄像头", "Camera")), ("microphone", t("麦克风", "Microphone")),
-    ("clipboard", t("剪贴板（含拖放）", "Clipboard (and drag and drop)")), ("location", t("定位", "Location")),
-]
-
 func openPrivacy(_ anchor: String) {
     NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)")!)
 }
@@ -113,10 +115,10 @@ struct Detail: View {
     let now: Date
     @State private var confirmReset = false
 
-    var status: String {
-        if app.inside { return t("正在结界中运行", "Running in Kekkai") }
-        if app.running { return t("正在结界外运行，请先完全退出", "Running outside Kekkai. Quit it first.") }
-        return t("未运行", "Not running")
+    var status: (String, Color) {
+        if app.inside { return (t("在结界中运行", "Running in Kekkai"), .green) }
+        if app.running { return (t("在结界外运行，请先完全退出", "Running outside Kekkai. Quit it first."), .orange) }
+        return (t("未运行", "Not running"), .secondary)
     }
     func clock(_ tz: String?) -> String {
         let f = DateFormatter()
@@ -125,89 +127,118 @@ struct Detail: View {
         f.timeZone = tz.flatMap(TimeZone.init(identifier:)) ?? .current
         return f.string(from: now)
     }
+    func set(_ args: [String], _ change: @escaping (inout AppEntry) -> Void) {
+        store.update(app.id, change)
+        store.perform(args)
+    }
+
+    var header: some View {
+        HStack(spacing: 16) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().frame(width: 64, height: 64)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(displayName(app)).font(.title.weight(.semibold))
+                HStack(spacing: 6) {
+                    Circle().fill(status.1).frame(width: 8, height: 8)
+                    Text(status.0).foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            if app.inside {
+                Button(t("停止", "Stop")) { store.perform(["stop", app.path]) }.controlSize(.large)
+            } else {
+                Button(t("在结界中打开", "Open in Kekkai")) { store.open(path: app.path) }
+                    .buttonStyle(.borderedProminent).controlSize(.large)
+                    .keyboardShortcut(.defaultAction).disabled(app.running)
+            }
+        }
+        .padding(.horizontal, 24).padding(.top, 22).padding(.bottom, 6)
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 14) {
-                Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().frame(width: 56, height: 56)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(displayName(app)).font(.title2.weight(.semibold))
-                    Text(status).foregroundStyle(.secondary)
-                }
-            }
-            Divider()
-            if app.sandboxed {
-                Text(t("它自带苹果沙盒，不能再套一层。结界会在模拟区域里放一份去掉苹果沙盒的副本，用临时签名重签后在结界中运行；原 App 和它的数据不动。副本当新软件用，要重新登录，原 App 更新后副本会自动重建。", "It already has Apple's sandbox, which can't be stacked. Kekkai puts a copy in the private space, removes Apple's sandbox, re-signs it locally and runs that copy instead. The original app and its data stay untouched. The copy starts fresh, so you'll sign in again, and it's rebuilt when the original updates."))
-                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            if !app.sandboxed {
-                Picker(t("存放改动", "Save changes to"), selection: Binding(
-                    get: { app.mode },
-                    set: { store.perform(["set-mode", app.id, $0]) })) {
-                    Text(t("模拟区域（可丢弃）", "Private space (discardable)")).tag("space")
-                    Text(t("真实文件", "Real files")).tag("real")
-                }
-                .disabled(app.inside)
-                }
-                if app.mode == "space" && !app.sandboxed {
-                    Toggle(t("首次打开时带入旧数据", "Bring existing data on first launch"), isOn: Binding(
-                        get: { app.bringOld },
-                        set: { store.perform(["set-bring-old", app.id, $0 ? "on" : "off"]) }))
-                        .disabled(app.inside || app.hasSpace)
-                    Text(app.bringOld ? t("首次打开时克隆它原有的数据，登录可能保留。", "Clones its existing data on first launch. You may stay signed in.") : t("当作新软件使用，不带任何旧数据，需要重新登录。", "Starts as a new app with no old data. You'll need to sign in again."))
-                        .font(.callout).foregroundStyle(.secondary)
-                }
-                Picker(t("结界内时区", "Time zone in Kekkai"), selection: Binding(
-                    get: { app.tz ?? "" },
-                    set: { store.perform(["set-tz", app.id, $0.isEmpty ? "-" : $0]) })) {
-                    Text(t("跟随系统", "System default")).tag("")
-                    ForEach(presetZones, id: \.1) { Text($0.0).tag($0.1) }
-                    if let tz = app.tz, !presetZones.contains(where: { $0.1 == tz }) { Text(tz).tag(tz) }
-                }
-                .disabled(app.inside)
-                Text(t("结界内显示：\(clock(app.tz))。改设置后下次打开生效。", "Shows \(clock(app.tz)). Changes apply next launch."))
-                    .font(.callout).foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(t("在结界中禁止使用", "Block in Kekkai")).font(.headline)
-                    HStack(spacing: 14) {
-                        ForEach(devices, id: \.0) { d in
-                            Toggle(d.1, isOn: Binding(
-                                get: { app.block.contains(d.0) },
-                                set: { store.perform(["set-block", app.id, d.0, $0 ? "on" : "off"]) }))
+        VStack(spacing: 0) {
+            header
+            Form {
+                Section {
+                    if app.sandboxed {
+                        LabeledContent(t("运行方式", "How it runs"), value: t("去掉苹果沙盒的副本", "Unsandboxed copy"))
+                    } else {
+                        Picker(t("存放改动", "Save changes to"), selection: Binding(
+                            get: { app.mode },
+                            set: { v in set(["set-mode", app.id, v]) { $0.mode = v } })) {
+                            Text(t("模拟区域", "Private space")).tag("space")
+                            Text(t("真实文件", "Real files")).tag("real")
+                        }
+                        .pickerStyle(.segmented)
+                        if app.mode == "space" {
+                            Toggle(t("首次打开时带入旧数据", "Bring existing data on first launch"), isOn: Binding(
+                                get: { app.bringOld },
+                                set: { v in set(["set-bring-old", app.id, v ? "on" : "off"]) { $0.bringOld = v } }))
+                                .disabled(app.hasSpace)
                         }
                     }
-                    .disabled(app.inside)
+                } header: { Text(t("数据", "Data")) } footer: {
+                    Text(app.sandboxed
+                         ? t("它自带苹果沙盒，不能再套一层。结界在模拟区域里放一份去掉苹果沙盒的副本来运行，原 App 和数据不动。副本要重新登录，原 App 更新后会自动重建。", "It already has Apple's sandbox, which can't be stacked. Kekkai runs an unsandboxed copy from the private space and leaves the original and its data alone. You'll sign in again, and the copy is rebuilt when the original updates.")
+                         : app.mode == "real" ? t("改动直接写进它原来的数据，只放行它自己的文件。", "Changes go straight into its existing data. Only its own files are allowed.")
+                         : app.hasSpace ? t("模拟区域已建好，想重来可以丢弃所有改动。", "The private space already exists. Discard all changes to start over.")
+                         : app.bringOld ? t("首次打开时克隆它原有的数据，登录可能保留。", "Clones its existing data on first launch, so you may stay signed in.")
+                         : t("当作新软件使用，不带任何旧数据，需要重新登录。", "Starts as a new app with no old data. You'll sign in again."))
+                        .foregroundStyle(.secondary)
                 }
-                HStack {
-                    if app.inside {
-                        Button(t("停止", "Stop")) { store.perform(["stop", app.path]) }
-                    } else {
-                        Button(t("在结界中打开", "Open in Kekkai")) { store.open(path: app.path) }
-                            .keyboardShortcut(.defaultAction)
-                            .disabled(app.running)
+
+                Section {
+                    Toggle(t("禁止剪贴板和拖放", "Block clipboard and drag and drop"), isOn: Binding(
+                        get: { app.block.contains("clipboard") },
+                        set: { v in set(["set-block", app.id, "clipboard", v ? "on" : "off"]) { e in
+                            e.block = e.block.filter { $0 != "clipboard" } + (v ? ["clipboard"] : []) } }))
+                    Picker(t("时区", "Time zone"), selection: Binding(
+                        get: { app.tz ?? "" },
+                        set: { v in set(["set-tz", app.id, v.isEmpty ? "-" : v]) { $0.tz = v.isEmpty ? nil : v } })) {
+                        Text(t("跟随系统", "System default")).tag("")
+                        ForEach(presetZones, id: \.1) { Text($0.0).tag($0.1) }
+                        if let tz = app.tz, !presetZones.contains(where: { $0.1 == tz }) { Text(tz).tag(tz) }
+                    }
+                } header: { Text(t("隔离", "Isolation")) } footer: {
+                    Text(t("结界内显示 \(clock(app.tz))。剪贴板关掉后复制、粘贴都不能用。设置会记住，下次打开生效。", "Shows \(clock(app.tz)) inside. With the clipboard blocked, copy and paste stop working. Settings are saved and apply next launch."))
+                        .foregroundStyle(.secondary)
+                }
+
+                Section {
+                    HStack {
+                        Button(t("摄像头", "Camera")) { openPrivacy("Privacy_Camera") }
+                        Button(t("麦克风", "Microphone")) { openPrivacy("Privacy_Microphone") }
+                        Button(t("定位", "Location")) { openPrivacy("Privacy_LocationServices") }
+                    }
+                } header: { Text(t("系统权限", "System permissions")) } footer: {
+                    Text(t("这些由系统按软件管理，从哪里打开都生效，在系统设置里关掉即可。", "macOS manages these for each app, however it's opened. Turn them off in System Settings."))
+                        .foregroundStyle(.secondary)
+                }
+
+                Section(t("更多", "More")) {
+                    HStack {
                         Button(t("学习模式（不隔离）", "Learn Mode (No Isolation)")) { store.perform(["learn", app.path]) }
-                            .disabled(app.running)
+                            .disabled(app.running || app.inside)
+                        Button(t("访问记录", "Access Log")) { store.showReport(path: app.path) }
+                        Button(t("交换文件夹", "Exchange Folder")) {
+                            let path = app.mode == "space" || app.sandboxed ? app.space + "/Downloads" : NSHomeDirectory() + "/KekkaiShare/" + app.name
+                            let url = URL(fileURLWithPath: path)
+                            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                            NSWorkspace.shared.open(url)
+                        }
+                        Spacer()
+                        if app.hasSpace {
+                            Button(t("丢弃所有改动…", "Discard All Changes…"), role: .destructive) { confirmReset = true }
+                                .disabled(app.inside)
+                        }
                     }
-                    Button(t("访问记录", "Access Log")) { store.showReport(path: app.path) }
                 }
-                HStack {
-                    Button(t("打开交换文件夹", "Open Exchange Folder")) {
-                        let path = app.mode == "space" ? app.space + "/Downloads" : NSHomeDirectory() + "/KekkaiShare/" + app.name
-                        let url = URL(fileURLWithPath: path)
-                        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-                        NSWorkspace.shared.open(url)
-                    }
-                    if app.hasSpace {
-                        Button(t("丢弃所有改动…", "Discard All Changes…"), role: .destructive) { confirmReset = true }
-                            .disabled(app.inside)
-                    }
-                }
-                .confirmationDialog(t("丢弃 \(displayName(app)) 在模拟区域里的所有改动？", "Discard all of \(displayName(app))'s changes in its private space?"), isPresented: $confirmReset) {
-                    Button(t("丢弃", "Discard"), role: .destructive) { store.perform(["reset", app.path]) }
-                    Button(t("取消", "Cancel"), role: .cancel) {}
-                } message: { Text(t("包括放在交换文件夹里的文件，不能恢复。下次打开时回到初始状态。", "This includes files in the exchange folder and can't be undone. The app starts fresh next time.")) }
-            Spacer()
+            }
+            .formStyle(.grouped)
+            .confirmationDialog(t("丢弃 \(displayName(app)) 在模拟区域里的所有改动？", "Discard all of \(displayName(app))'s changes in its private space?"), isPresented: $confirmReset) {
+                Button(t("丢弃", "Discard"), role: .destructive) { store.perform(["reset", app.path]) }
+                Button(t("取消", "Cancel"), role: .cancel) {}
+            } message: { Text(t("包括放在交换文件夹里的文件，不能恢复。下次打开时回到初始状态。", "This includes files in the exchange folder and can't be undone. The app starts fresh next time.")) }
         }
-        .padding(24)
     }
 }
 
@@ -247,7 +278,7 @@ struct NeverSheet: View {
 
 struct ContentView: View {
     @StateObject private var store = Store.shared
-    @State private var selection: String?
+    @AppStorage("selection") private var selection: String?
     @State private var query = ""
     @State private var dropping = false
     @State private var showNever = false
@@ -265,7 +296,7 @@ struct ContentView: View {
                         Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().frame(width: 20, height: 20)
                         Text(displayName(app)).lineLimit(1)
                         Spacer()
-                        if app.inside { Circle().fill(.green).frame(width: 7, height: 7).accessibilityLabel("结界中") }
+                        if app.inside { Circle().fill(.green).frame(width: 7, height: 7).accessibilityLabel(t("结界中", "In Kekkai")) }
                     }
                 }
                 Button(t("必定隔离的文件夹…", "Always-Blocked Folders…")) { showNever = true }.padding(10)
@@ -283,7 +314,7 @@ struct ContentView: View {
             }
             .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 640, minHeight: 420)
+        .frame(minWidth: 720, minHeight: 520)
         .overlay { if dropping { RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor, lineWidth: 3).padding(4) } }
         .onDrop(of: [UTType.fileURL], isTargeted: $dropping) { providers in
             for p in providers {

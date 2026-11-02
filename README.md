@@ -33,7 +33,7 @@ Quit the app completely before opening it from Kekkai. Copies launched from thei
 - **Private space.** Each app gets its own home folder at `/Users/Shared/Kekkai/<bundle id>` and starts as a fresh install. Your existing copy of the app and its data stay untouched. Every change stays in the private space, and you can discard it with one click. If you'd rather stay signed in, turn on **Bring existing data on first launch**. Kekkai then makes an APFS clone, which takes no extra disk space.
 - **Hidden means missing.** Your home folder, `/Applications`, external drives, `/private/tmp` and other apps' data all look like they don't exist. The app gets "no such file", not "permission denied".
 - **Hidden user name.** The app sees the user name `user`.
-- **Device blocking.** Turn off the camera, microphone, clipboard (including drag and drop) or location for each app. Location is off by default.
+- **Clipboard blocking.** Cut an app off from the clipboard entirely, including drag and drop. Camera, microphone and location are left to macOS, which already controls them per app; the detail page links to the right System Settings pages.
 - **Always-blocked folders.** These override every other rule, apply in Learn Mode too, and can't be reached through symlinks. The defaults are `~/.ssh`, `~/.gnupg` and `~/.aws`.
 - **Learn Mode.** Run an app once without isolation to log which outside paths it touches, then decide what to allow.
 - **Per-app time zone.** Each app can show its own time zone.
@@ -52,7 +52,7 @@ Tested on macOS 27.2:
 | WeChat DevTools | Launches and writes only inside its private space |
 | QQ, WeChat | Run as an unsandboxed copy. Both reach the QR sign-in screen and leave the real data folders unchanged. Use after sign-in hasn't been tested |
 
-With the camera blocked, the app finds no cameras at all. With the clipboard or location blocked, the app can't reach those system services. The microphone rule is accepted by macOS but hasn't been tested in a real call yet.
+With the clipboard blocked, the app can't reach the clipboard service at all. This goes further than macOS's own Paste from Other Apps setting, which only asks before an app reads the clipboard on its own.
 
 ## Apps with Apple's App Sandbox (QQ, WeChat)
 
@@ -74,7 +74,7 @@ kekkai list
 kekkai set-tz <bundle id> <time zone|->
 kekkai set-mode <bundle id> <space|real>
 kekkai set-bring-old <bundle id> <on|off>
-kekkai set-block <bundle id> <camera|microphone|clipboard|location> <on|off>
+kekkai set-block <bundle id> clipboard <on|off>
 kekkai never list|add|rm [path]
 ```
 

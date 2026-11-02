@@ -16,9 +16,10 @@
   kekkai allow <bundle id> add|rm <文件夹>
   kekkai decide <bundle id> allow|deny <操作> <对象>
   kekkai set-location <bundle id> <WGS-84 纬度> <经度> [名称] | -
+  kekkai new-identity <bundle id>
   kekkai never list|add|rm [路径]
 """
-import json, os, plistlib, re, shutil, subprocess, sys
+import json, os, plistlib, re, secrets, shutil, subprocess, sys, uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -118,6 +119,29 @@ def injectable(app):
     if flags & 0x10000:  # 强化运行时
         return bool(ents.get("com.apple.security.cs.allow-dyld-environment-variables") and no_validation)
     return not (flags & 0x2000) or bool(no_validation)  # 0x2000：只许加载同一开发者签的库
+
+
+# 会认出这台 Mac 的硬件属性；能注入的软件拿到假值，不能注入的直接拿不到
+HARDWARE_IDS = ["IOPlatformSerialNumber", "IOPlatformUUID", "serial-number", "mlb-serial-number", "IOMACAddress"]
+
+
+def model_name():
+    out = subprocess.run(["system_profiler", "SPHardwareDataType"], capture_output=True, text=True).stdout
+    m = re.search(r"(?:Model Name|型号名称)[:：]\s*(.+)", out)
+    return m.group(1).strip() if m else "Mac"
+
+
+def identity(bundle_id):
+    """每个软件一套固定的假设备身份，第一次用时生成；软件之间各不相同，没法靠设备号把你串起来。"""
+    data = settings()
+    entry = data.setdefault(bundle_id, {})
+    if not entry.get("identity"):
+        chars = "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789"  # 苹果序列号不用 I 和 O
+        entry["identity"] = {"serial": "".join(secrets.choice(chars) for _ in range(10)),
+                             "uuid": str(uuid.uuid4()).upper(), "seed": secrets.token_hex(8),
+                             "name": model_name()}  # 电脑名用机型，和新 Mac 的默认名一样，不带你的名字
+        save_settings(data)
+    return entry["identity"]
 
 
 def settings():
@@ -343,6 +367,9 @@ def common_rules(rule, conf, mode="space"):
     if not opt(rule, conf, "keep_username"):
         L += [";; 挡住目录服务，软件查不到真实用户名",
               "(deny mach-lookup", *[f"  (global-name {q(x)})" for x in DIRECTORY_SERVICES], ")"]
+    if not opt(rule, conf, "keep_identity"):
+        L += [";; 挡住序列号、硬件 UUID、网卡地址",
+              "(deny iokit-get-properties (with errno 2) (iokit-property " + " ".join(q(x) for x in HARDWARE_IDS) + "))"]
     if not conf.get("allow_open"):
         # 经系统拉起的软件不在结界里，挡住它就挡住了借别的软件逃出去的路；代价是不能用浏览器打开链接
         L += [";; 不许拉起其他软件、不许给其他软件发自动化指令", "(deny lsopen)", "(deny appleevent-send)"]
@@ -912,9 +939,14 @@ def run(app, learn=False):
         tmp.mkdir(parents=True, exist_ok=True)
         env["TMPDIR"] = env["MAC_CHROMIUM_TMPDIR"] = str(tmp) + "/"  # Chromium 内核不认 TMPDIR
     libs = []
-    if not learn and mode == "space" and not opt(rule, conf, "keep_username") and injectable(app):
-        libs.append("libkekkaiuser.dylib")  # 问用户名时答 user，不必放开系统查询
-        env["KEKKAI_HOME"] = env["HOME"]
+    if not learn and injectable(app):
+        if mode == "space" and not opt(rule, conf, "keep_username"):
+            env["KEKKAI_HOME"] = env["HOME"]  # 问用户名时答 user，不必放开系统查询
+        if not opt(rule, conf, "keep_identity"):
+            i = identity(bundle_id)
+            env.update(KEKKAI_SERIAL=i["serial"], KEKKAI_UUID=i["uuid"], KEKKAI_SEED=i["seed"], KEKKAI_NAME=i["name"])
+        if "KEKKAI_HOME" in env or "KEKKAI_SEED" in env:
+            libs.append("libkekkai.dylib")
     if fake:
         libs.append("libfakeloc.dylib")
         env.update(KEKKAI_LAT=str(fake["lat"]), KEKKAI_LON=str(fake["lon"]))
@@ -1060,7 +1092,7 @@ def list_apps():
             out.append({"id": bundle_id, "name": app.stem, "path": str(app), "sandboxed": cache[key]["sandboxed"],
                         "perms": [t(PERMISSIONS[k], PERMISSIONS_EN[k]) for k in cache[key]["perm_keys"]], "inside": inside, "running": f"{app}/Contents/MacOS/{exe}" in procs,
                         "tz": c.get("tz"), "mode": effective_mode(bundle_id, c, load_rule(bundle_id)),
-                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c), "location": c.get("location"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "options": {k: opt(load_rule(bundle_id), c, v) for k, v in OPTIONS.items()}, "autoEnabled": c.get("auto_enabled", []), "tuned": bool(c.get("tuned")), "reviewed": bool(c.get("decided")), "space": str(space), "hasSpace": space.exists()})
+                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c), "location": c.get("location"), "identity": c.get("identity"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "options": {k: opt(load_rule(bundle_id), c, v) for k, v in OPTIONS.items()}, "autoEnabled": c.get("auto_enabled", []), "tuned": bool(c.get("tuned")), "reviewed": bool(c.get("decided")), "space": str(space), "hasSpace": space.exists()})
     STATE.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(cache))
     print(json.dumps(out, ensure_ascii=False))
@@ -1078,6 +1110,8 @@ def main():
         return set_field(a[1], "bring_old_data", True if a[2] == "on" else "-")
     if len(a) == 4 and a[0] == "allow" and a[2] in ("add", "rm"):
         return set_allow(a[1], a[2], a[3])
+    if len(a) == 2 and a[0] == "new-identity":
+        return set_field(a[1], "identity", "-")  # 下次打开时生成新的一套
     if a[:1] == ["set-location"] and (a[2:] == ["-"] or len(a) >= 4):
         return set_location(a[1], a[2:])
     if len(a) == 4 and a[0] == "set" and a[2] in OPTIONS and a[3] in ("on", "off"):

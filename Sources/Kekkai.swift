@@ -46,6 +46,11 @@ struct Place: Codable, Equatable {
     var mapCoordinate: CLLocationCoordinate2D { mars == true ? Mars.fromWGS(coordinate) : coordinate }
 }
 
+// 结界给这个软件的假设备身份，第一次打开时生成
+struct Identity: Codable, Equatable {
+    var serial, uuid, name: String
+}
+
 struct AppEntry: Codable, Identifiable, Equatable {
     let id, name, path: String
     let sandboxed, inside, running, hasSpace: Bool
@@ -54,6 +59,7 @@ struct AppEntry: Codable, Identifiable, Equatable {
     let perms: [String]
     var block: [String]
     var location: Place?
+    var identity: Identity? = nil
     var mode: String
     var allow: [String]
     var allowOpen: Bool
@@ -176,6 +182,7 @@ struct Detail: View {
     @ObservedObject var store: Store
     let now: Date
     @State private var picking = false
+    @State private var renewing = false
     @State private var importing = false
 
     var status: (String, Color) {
@@ -315,9 +322,23 @@ struct Detail: View {
                             Button(t("选择…", "Choose…")) { picking = true }
                         }
                     }
+                    LabeledContent(t("设备", "Device")) {
+                        HStack {
+                            Text(app.identity.map { "\($0.name) · \($0.serial)" } ?? t("下次打开时生成", "Created at next launch"))
+                                .foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
+                            Button(t("换个身份", "New Identity")) { renewing = true }
+                                .disabled(app.identity == nil)
+                        }
+                    }
                 } header: { Text(t("伪装", "Disguise")) } footer: {
-                    Text(t("结界内时间 \(clock(app.tz))。下次打开生效。", "Time inside: \(clock(app.tz)). Changes apply next launch."))
+                    Text(t("结界内时间 \(clock(app.tz))。它看到的序列号、硬件 UUID、网卡地址和电脑名都是结界给它的一套，每个软件各不相同，真实的读不到；机型、系统版本这类很多台 Mac 都一样的不改。换个身份后，它会把这里当成一台新 Mac，账号可能要重新验证；它自己存下的设备号要清空数据才会消失。下次打开生效。",
+                           "Time inside: \(clock(app.tz)). The serial number, hardware UUID, network addresses and computer name it sees are a set Kekkai made for this app alone; it can't read the real ones. Things many Macs share, such as model and macOS version, are left as is. After New Identity it treats this as a new Mac and your account may ask you to verify again; device IDs the app saved itself go only when you clear its data. Changes apply next launch."))
                         .foregroundStyle(.secondary)
+                }
+                .confirmationDialog(t("给它换一套设备身份？", "Give it a new device identity?"), isPresented: $renewing) {
+                    Button(t("换个身份", "New Identity")) { set(["new-identity", app.id]) { $0.identity = nil } }
+                } message: {
+                    Text(t("下次打开时，它会看到另一台 Mac 的序列号、硬件 UUID 和网卡地址。", "Next launch it will see another Mac's serial number, hardware UUID and network addresses."))
                 }
 
                 Section {

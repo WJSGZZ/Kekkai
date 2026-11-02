@@ -281,16 +281,56 @@ def report(app):
     print(out)
 
 
+# 去掉这些后才能用临时签名重签；苹果沙盒不能叠加，受限权限没有描述文件会被系统拒绝
+STRIP = ("com.apple.security.app-sandbox", "com.apple.security.inherit", "com.apple.application-identifier",
+         "com.apple.developer.", "keychain-access-groups")
+
+
+def resign(bundle):
+    ents = entitlements(bundle)
+    kept = {k: v for k, v in ents.items() if not k.startswith(STRIP)}
+    STATE.mkdir(parents=True, exist_ok=True)
+    tmp = STATE / "entitlements.plist"
+    plistlib.dump(kept, open(tmp, "wb"))
+    r = subprocess.run(["codesign", "-f", "-s", "-", "--entitlements", str(tmp), bundle], capture_output=True, text=True)
+    if r.returncode:
+        sys.exit(t(f"重签名失败：{r.stderr.strip()}", f"Re-signing failed: {r.stderr.strip()}"))
+
+
+def unsandboxed_copy(app, bundle_id):
+    """自带苹果沙盒的 App 再套一层会崩溃。在模拟区域里放一份 APFS 克隆，去掉苹果沙盒后重签，原 App 不动。"""
+    seed_space(bundle_id, {})
+    dst = space_of(bundle_id) / "Applications" / Path(app).name
+    stamp = dst.parent / (Path(app).name + ".source")
+    src_id = str(Path(app, "Contents/Info.plist").stat().st_mtime)
+    if dst.exists() and stamp.exists() and stamp.read_text() == src_id:
+        return str(dst)
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["cp", "-cR", app, str(dst)], check=True)
+    files = [p for p in dst.joinpath("Contents").rglob("*") if not p.is_symlink()]
+    bundles = [p for p in files if p.suffix in (".app", ".appex", ".xpc") and p.is_dir()]
+    loose = [p for p in files if p.is_file() and os.access(p, os.X_OK) and p.parent.name != "MacOS"
+             and any(k.startswith(STRIP) for k in entitlements(str(p)))]  # 如微信的 crashpad_handler
+    for b in loose + sorted(bundles, key=lambda p: -len(p.parts)):  # 先签里层
+        resign(str(b))
+    resign(str(dst))
+    stamp.write_text(src_id)
+    return str(dst)
+
+
 def run(app, learn=False):
     app = str(Path(app).resolve())
     bundle_id, exe = info(app)
-    if entitlements(app).get("com.apple.security.app-sandbox"):
-        return t(f"{Path(app).stem} 自带苹果沙盒，再套一层会崩溃（微信已实测）。它能碰什么，请看界面里的权限清单。", f"{Path(app).stem} has Apple's own sandbox, and adding another layer would crash it. See its permission list in the app.")
+    sandboxed = bool(entitlements(app).get("com.apple.security.app-sandbox"))
+    if sandboxed:
+        app = unsandboxed_copy(app, bundle_id)
     binary = f"{app}/Contents/MacOS/{exe}"
     if subprocess.run(["pgrep", "-f", "^" + re.escape(binary)], capture_output=True).returncode == 0:
         return t(f"{Path(app).stem} 已在运行。请先完全退出，再放进结界。", f"{Path(app).stem} is already running. Quit it completely first.")
     rule, conf = load_rule(bundle_id), settings().get(bundle_id, {})
-    mode = effective_mode(bundle_id, conf, rule)
+    mode = "space" if sandboxed else effective_mode(bundle_id, conf, rule)
     STATE.mkdir(parents=True, exist_ok=True)
     env = {"TZ": conf["tz"]} if conf.get("tz") else {}
     cwd = "/"
@@ -314,8 +354,8 @@ def run(app, learn=False):
         if not rule.get("keep_username"):
             env.update(USER="user", LOGNAME="user")
     args = ["/usr/bin/sandbox-exec", "-f", str(sb), binary]
-    if Path(app, "Contents/Frameworks/Electron Framework.framework").exists():
-        args.append("--no-sandbox")  # Electron 自带沙盒不能嵌套
+    if any(Path(app, "Contents/Frameworks").glob("* Helper (GPU).app")):
+        args.append("--no-sandbox")  # Electron／Chromium 自带沙盒不能嵌套
     args += rule.get("args", [])
     job = STATE / f"{label(bundle_id)}.plist"
     plistlib.dump({"Label": label(bundle_id), "ProgramArguments": args, "RunAtLoad": True, "KeepAlive": False,

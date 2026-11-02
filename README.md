@@ -50,13 +50,19 @@ Tested on macOS 27.2:
 | Baidu Netdisk | Starts fresh to the sign-in screen. With existing data it stays signed in, lists files, and leaves the real data folder unchanged |
 | Tencent Meeting | Reached the sign-in screen on three launches in a row |
 | WeChat DevTools | Launches and writes only inside its private space |
-| QQ, WeChat | Can't be wrapped (see below) |
+| QQ, WeChat | Run as an unsandboxed copy. Both reach the QR sign-in screen and leave the real data folders unchanged. Use after sign-in hasn't been tested |
 
 With the camera blocked, the app finds no cameras at all. With the clipboard or location blocked, the app can't reach those system services. The microphone rule is accepted by macOS but hasn't been tested in a real call yet.
 
-## QQ and WeChat
+## Apps with Apple's App Sandbox (QQ, WeChat)
 
-These apps already run in Apple's App Sandbox, and adding a second sandbox makes them crash at launch. This happened with both apps, no matter how loose the Kekkai profile was. Apple's sandbox already limits them to their own container, Downloads, and files you pick. Kekkai lists the permissions they declare and links to System Settings, where you can turn off the camera, microphone and **Paste from Other Apps** for each one under Privacy & Security. Keep sensitive files out of Downloads.
+Wrapped directly, these apps crash at launch inside macOS's own sandbox setup, however loose the Kekkai rules are. This happened with both QQ and WeChat. Instead, Kekkai puts an APFS clone of the app in its private space, removes Apple's sandbox and any entitlements that need a developer certificate, re-signs the copy locally, and runs that copy inside Kekkai.
+
+- The original app and its data aren't touched. Opening it from its own icon works as before.
+- The copy starts fresh, so you'll sign in again. When the original updates, the copy is rebuilt on the next launch.
+- The clone takes almost no space. Only the re-signed files use extra disk.
+- macOS treats the copy as a different app, so you'll grant camera and microphone access again.
+- Without Apple's sandbox, the copy is limited only by Kekkai's rules.
 
 ## Command line
 

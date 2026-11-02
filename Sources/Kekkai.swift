@@ -115,7 +115,6 @@ struct Detail: View {
 
     var status: String {
         if app.inside { return t("正在结界中运行", "Running in Kekkai") }
-        if app.sandboxed { return t("自带苹果沙盒，不再套一层", "Has Apple's own sandbox") }
         if app.running { return t("正在结界外运行，请先完全退出", "Running outside Kekkai. Quit it first.") }
         return t("未运行", "Not running")
     }
@@ -137,18 +136,10 @@ struct Detail: View {
             }
             Divider()
             if app.sandboxed {
-                Text(t("苹果沙盒已限制它，它能碰的只有：", "Apple's sandbox already limits this app. It can only access:")).font(.headline)
-                ForEach(app.perms, id: \.self) { Text("• \($0)") }
-                Text(t("桌面、文稿和你的其他文件，它按声明碰不到。再套一层会让它崩溃，所以结界不接管它。别把敏感文件放进下载文件夹。", "By its declared permissions it can't reach Desktop, Documents or your other files. Adding another layer would crash it, so Kekkai leaves it alone. Keep sensitive files out of Downloads."))
+                Text(t("它自带苹果沙盒，不能再套一层。结界会在模拟区域里放一份去掉苹果沙盒的副本，用临时签名重签后在结界中运行；原 App 和它的数据不动。副本当新软件用，要重新登录，原 App 更新后副本会自动重建。", "It already has Apple's sandbox, which can't be stacked. Kekkai puts a copy in the private space, removes Apple's sandbox, re-signs it locally and runs that copy instead. The original app and its data stay untouched. The copy starts fresh, so you'll sign in again, and it's rebuilt when the original updates."))
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Text(t("摄像头、麦克风和读取剪贴板由系统设置管，关掉后它就用不了：", "Camera, microphone and pasting are controlled in System Settings. Turn them off there:"))
-                    .font(.callout).fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Button(t("摄像头", "Camera")) { openPrivacy("Privacy_Camera") }
-                    Button(t("麦克风", "Microphone")) { openPrivacy("Privacy_Microphone") }
-                    Button(t("隐私与安全性", "Privacy & Security")) { openPrivacy("Privacy") }
-                }
-            } else {
+            }
+            if !app.sandboxed {
                 Picker(t("存放改动", "Save changes to"), selection: Binding(
                     get: { app.mode },
                     set: { store.perform(["set-mode", app.id, $0]) })) {
@@ -156,7 +147,8 @@ struct Detail: View {
                     Text(t("真实文件", "Real files")).tag("real")
                 }
                 .disabled(app.inside)
-                if app.mode == "space" {
+                }
+                if app.mode == "space" && !app.sandboxed {
                     Toggle(t("首次打开时带入旧数据", "Bring existing data on first launch"), isOn: Binding(
                         get: { app.bringOld },
                         set: { store.perform(["set-bring-old", app.id, $0 ? "on" : "off"]) }))
@@ -213,7 +205,6 @@ struct Detail: View {
                     Button(t("丢弃", "Discard"), role: .destructive) { store.perform(["reset", app.path]) }
                     Button(t("取消", "Cancel"), role: .cancel) {}
                 } message: { Text(t("包括放在交换文件夹里的文件，不能恢复。下次打开时回到初始状态。", "This includes files in the exchange folder and can't be undone. The app starts fresh next time.")) }
-            }
             Spacer()
         }
         .padding(24)
@@ -276,7 +267,6 @@ struct ContentView: View {
                         Spacer()
                         if app.inside { Circle().fill(.green).frame(width: 7, height: 7).accessibilityLabel("结界中") }
                     }
-                    .opacity(app.sandboxed ? 0.5 : 1)
                 }
                 Button(t("必定隔离的文件夹…", "Always-Blocked Folders…")) { showNever = true }.padding(10)
             }

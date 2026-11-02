@@ -67,7 +67,17 @@ struct AppEntry: Codable, Identifiable, Equatable {
     var autoEnabled: [String]? = nil
     var reviewed: Bool
     let space: String
+    var added: Bool? = nil
 }
+
+struct AddResult: Decodable {
+    let ok: Bool
+    let reason: String
+    let autoEnabled: [String]
+}
+
+let tunableNames = ["allow_localhost": t("本机端口", "Ports on this Mac"), "allow_procinfo": t("其他进程信息", "Other processes"),
+                    "allow_open": t("打开其他 App 与链接", "Opening other apps and links")]
 
 enum CLI {
     static let path = NSHomeDirectory() + "/Library/Application Support/Kekkai/bin/kekkai"
@@ -85,6 +95,8 @@ enum CLI {
         return (p.terminationStatus == 0, String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
     }
 }
+
+struct PendingAdd: Identifiable { let path: String; var id: String { path } }
 
 final class Store: ObservableObject {
     static let shared = Store()
@@ -134,11 +146,33 @@ final class Store: ObservableObject {
             let r = CLI.call(["run", path])
             DispatchQueue.main.async {
                 if !r.ok { self.message = r.out }
-                self.reveal = path
                 self.refresh()
             }
         }
     }
+
+    /// 添加就是第一次试运行，可能要一两分钟
+    func add(path: String, done: @escaping (AddResult) -> Void) {
+        DispatchQueue.global().async {
+            let r = CLI.call(["add", path])
+            let res = (try? JSONDecoder().decode(AddResult.self, from: Data(r.out.utf8)))
+                ?? AddResult(ok: false, reason: r.out.isEmpty ? t("试运行没有结果。", "The trial run gave no result.") : r.out, autoEnabled: [])
+            DispatchQueue.main.async { done(res); self.refresh() }
+        }
+    }
+
+    /// 双击：没在运行就从结界打开，已在运行就切到它
+    func launch(_ app: AppEntry) {
+        if app.inside, let running = NSRunningApplication.runningApplications(withBundleIdentifier: app.id).first {
+            running.activate()
+        } else if app.running {
+            message = t("\(displayName(app)) 正在结界外运行。请先完全退出它，再从结界打开。", "\(displayName(app)) is running outside Kekkai. Quit it completely first.")
+        } else {
+            open(path: app.path)
+        }
+    }
+
+    @Published var pendingAdd: PendingAdd?
 
     func makeLauncher(_ app: AppEntry) {
         DispatchQueue.global().async {
@@ -162,7 +196,11 @@ final class Store: ObservableObject {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func application(_ application: NSApplication, open urls: [URL]) {
-        urls.filter { $0.pathExtension == "app" }.forEach { Store.shared.open(path: $0.path) }
+        // 拖到图标上的软件：已添加的直接打开，没添加的先走添加（试运行）
+        for url in urls where url.pathExtension == "app" {
+            if let app = Store.shared.apps.first(where: { $0.path == url.path && $0.added == true }) { Store.shared.launch(app) }
+            else { Store.shared.pendingAdd = PendingAdd(path: url.path) }
+        }
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
@@ -184,6 +222,7 @@ struct Detail: View {
     @State private var picking = false
     @State private var renewing = false
     @State private var importing = false
+    @State private var removing = false
 
     var status: (String, Color) {
         if app.inside { return (t("在结界中运行", "Running in Kekkai"), .green) }
@@ -224,6 +263,8 @@ struct Detail: View {
             } else {
                 Menu {
                     Button(t("在“应用程序”中创建结界入口", "Add a Kekkai Launcher to Applications")) { store.makeLauncher(app) }
+                    Divider()
+                    Button(t("从结界移除…", "Remove from Kekkai…")) { removing = true }
                 } label: { Text(t("在结界中打开", "Open in Kekkai")) } primaryAction: { store.open(path: app.path) }
                     .menuStyle(.button).fixedSize()
                     .buttonStyle(.borderedProminent).controlSize(.large)
@@ -296,8 +337,7 @@ struct Detail: View {
                         get: { app.allowOpen },
                         set: { v in set(["set-open", app.id, v ? "on" : "off"]) { $0.allowOpen = v } }))
                 } header: { Text(t("权限", "Permissions")) } footer: {
-                    let names = ["allow_localhost": t("本机端口", "Ports on this Mac"), "allow_procinfo": t("其他进程信息", "Other processes"), "allow_open": t("打开其他 App 与链接", "Opening other apps and links")]
-                    let auto = (app.autoEnabled ?? []).compactMap { names[$0] }
+                    let auto = (app.autoEnabled ?? []).compactMap { tunableNames[$0] }
                     if !auto.isEmpty {
                         Text(t("首次运行时自动开启了：\(auto.joined(separator: "、"))。不开它会启动失败。", "Turned on automatically at first launch: \(auto.joined(separator: ", ")). It failed to start without them."))
                             .foregroundStyle(.orange)
@@ -356,6 +396,11 @@ struct Detail: View {
 
             }
             .formStyle(.grouped)
+            .confirmationDialog(t("从结界移除 \(displayName(app))？", "Remove \(displayName(app)) from Kekkai?"), isPresented: $removing) {
+                Button(t("移除", "Remove"), role: .destructive) { store.perform(["remove", app.path]); store.selected = nil }
+            } message: {
+                Text(t("只是从列表里拿掉。它的结界文件夹和设置会留着，以后再添加接着用。", "It's only taken off the list. Its Kekkai folder and settings stay, ready if you add it again."))
+            }
             .confirmationDialog(t("用原 App 的数据替换它在结界里的数据？", "Replace its data in Kekkai with the original app's data?"), isPresented: $importing) {
                 Button(t("导入", "Import"), role: .destructive) { store.perform(["import", app.path]) }
             } message: {
@@ -667,60 +712,252 @@ struct NeverSheet: View {
     }
 }
 
+/// 网格里的一个软件：大图标、名字，在结界里运行时右下角一个绿点
+struct AppTile: View {
+    let app: AppEntry
+    let selected: Bool
+    @State private var hover = false
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().interpolation(.high)
+                .frame(width: 72, height: 72)
+                .overlay(alignment: .bottomTrailing) {
+                    if app.inside {
+                        Circle().fill(.green).frame(width: 12, height: 12)
+                            .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 2.5))
+                            .accessibilityLabel(t("在结界中运行", "Running in Kekkai"))
+                    }
+                }
+            Text(displayName(app)).font(.callout).lineLimit(2).multilineTextAlignment(.center)
+                .frame(height: 34, alignment: .top)
+        }
+        .padding(.top, 14).padding(.horizontal, 8).frame(width: 116)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(selected ? Color.accentColor.opacity(0.16) : hover ? Color.primary.opacity(0.05) : .clear))
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onHover { hover = $0 }
+    }
+}
+
+/// 添加：选一个软件，在结界里试运行，撑得住才加进来
+struct AddSheet: View {
+    @ObservedObject var store: Store
+    let initialPath: String?
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    @State private var testing: AppEntry?
+    @State private var testingPath: String?
+    @State private var result: AddResult?
+
+    var library: [AppEntry] {
+        let all = store.apps.filter { $0.added != true && !$0.id.hasPrefix("com.apple.") }
+        return query.isEmpty ? all : all.filter { displayName($0).localizedCaseInsensitiveContains(query) || $0.name.localizedCaseInsensitiveContains(query) }
+    }
+    var name: String {
+        testing.map(displayName) ?? testingPath.map { (FileManager.default.displayName(atPath: $0) as NSString).deletingPathExtension } ?? ""
+    }
+
+    func start(_ path: String) {
+        testingPath = path
+        testing = store.apps.first { $0.path == path }
+        result = nil
+        store.add(path: path) { result = $0 }
+    }
+
+    var body: some View {
+        Group {
+            if let path = testingPath { trial(path) } else { chooser }
+        }
+        .frame(width: 460, height: 520)
+        .onAppear { if let p = initialPath { start(p) } }
+    }
+
+    var chooser: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(t("添加软件", "Add an App")).font(.title3.weight(.semibold))
+                Text(t("添加时会在结界里试运行一次，能正常启动才加进来。", "Kekkai runs it once as a trial and adds it only if it starts properly."))
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding([.horizontal, .top], 20).padding(.bottom, 12)
+            TextField(t("搜索", "Search"), text: $query).textFieldStyle(.roundedBorder).padding(.horizontal, 20).padding(.bottom, 8)
+            List(library) { app in
+                Button { start(app.path) } label: {
+                    HStack(spacing: 10) {
+                        Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().frame(width: 28, height: 28)
+                        Text(displayName(app))
+                        Spacer()
+                        if app.running { Text(t("正在运行", "Running")).font(.caption).foregroundStyle(.secondary) }
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).padding(.vertical, 2)
+            }
+            .listStyle(.inset)
+            HStack {
+                Button(t("其他位置…", "Other…")) {
+                    let panel = NSOpenPanel()
+                    panel.allowedContentTypes = [.applicationBundle]
+                    panel.directoryURL = URL(fileURLWithPath: "/Applications")
+                    if panel.runModal() == .OK, let p = panel.url?.path { start(p) }
+                }
+                Spacer()
+                Button(t("取消", "Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+            .padding(16)
+        }
+    }
+
+    func trial(_ path: String) -> some View {
+        VStack(spacing: 18) {
+            Spacer()
+            Image(nsImage: NSWorkspace.shared.icon(forFile: path)).resizable().frame(width: 96, height: 96)
+                .overlay(alignment: .bottomTrailing) {
+                    if let r = result {
+                        Image(systemName: r.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .font(.system(size: 28)).symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, r.ok ? Color.green : Color.red)
+                            .background(Circle().fill(Color(nsColor: .windowBackgroundColor)).padding(-2))
+                    }
+                }
+            if let r = result {
+                Text(r.ok ? t("已添加 \(name)", "\(name) added") : t("\(name) 不能在结界中运行", "\(name) can't run in Kekkai"))
+                    .font(.title3.weight(.semibold))
+                Group {
+                    if r.ok {
+                        let auto = r.autoEnabled.compactMap { tunableNames[$0] }
+                        Text(auto.isEmpty ? t("所有权限关着也能运行。它现在正在结界里运行，以后双击图标即可打开。", "It runs with every permission off. It's running in Kekkai now; double-click its icon to open it later.")
+                             : t("为了能运行，自动开启了：\(auto.joined(separator: "、"))。它现在正在结界里运行。", "To run, it needed: \(auto.joined(separator: ", ")). It's running in Kekkai now."))
+                    } else {
+                        Text(r.reason + t("\n没有添加。", "\nIt wasn't added."))
+                    }
+                }
+                .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(t("正在结界里试运行 \(name)", "Trying \(name) in Kekkai")).font(.title3.weight(.semibold))
+                ProgressView().controlSize(.small)
+                Text(t("它会打开一会儿。所有权限关着撑得住就添加；撑不住会逐项试出它离不开的权限。通常二十多秒，最长约两分钟。",
+                       "It opens for a moment. If it holds up with every permission off, it's added; if not, Kekkai finds the permissions it can't do without. Usually about 20 seconds, at most about two minutes."))
+                    .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            HStack {
+                Spacer()
+                if result == nil {
+                    Button(t("停止试运行", "Stop Trial")) { store.perform(["stop", path]) }
+                } else {
+                    Button(t("完成", "Done")) {
+                        if result?.ok == true, let id = store.apps.first(where: { $0.path == path })?.id { store.selected = id }
+                        dismiss()
+                    }
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+        }
+        .padding(28)
+    }
+}
+
 struct ContentView: View {
     @StateObject private var store = Store.shared
-    @AppStorage("selection") private var selection: String?
+    @State private var selection: String?
     @State private var query = ""
     @State private var dropping = false
     @State private var showNever = false
+    @State private var adding = false
     @State private var now = Date()
     private let tick = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
 
-    var shown: [AppEntry] { query.isEmpty ? store.apps : store.apps.filter { displayName($0).localizedCaseInsensitiveContains(query) || $0.name.localizedCaseInsensitiveContains(query) } }
+    var added: [AppEntry] {
+        let all = store.apps.filter { $0.added == true }
+        return query.isEmpty ? all : all.filter { displayName($0).localizedCaseInsensitiveContains(query) || $0.name.localizedCaseInsensitiveContains(query) }
+    }
 
     var body: some View {
-        HSplitView {
-            VStack(spacing: 0) {
-                TextField(t("搜索 App", "Search apps"), text: $query).textFieldStyle(.roundedBorder).padding(10)
-                List(shown, selection: $selection) { app in
-                    HStack(spacing: 8) {
-                        Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().frame(width: 20, height: 20)
-                        Text(displayName(app)).lineLimit(1)
-                        Spacer()
-                        if app.inside { Circle().fill(.green).frame(width: 7, height: 7).accessibilityLabel(t("结界中", "In Kekkai")) }
+        Group {
+            if store.apps.contains(where: { $0.added == true }) {
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 116, maximum: 132), spacing: 6)], spacing: 10) {
+                        ForEach(added) { app in
+                            AppTile(app: app, selected: selection == app.id)
+                                .onTapGesture(count: 2) { store.launch(app) }
+                                .simultaneousGesture(TapGesture().onEnded { selection = app.id })
+                                .contextMenu { menu(app) }
+                                .help(t("双击在结界中打开", "Double-click to open in Kekkai"))
+                        }
                     }
+                    .padding(24)
                 }
-                Button(t("必定隔离的文件夹…", "Always-Blocked Folders…")) { showNever = true }.padding(10)
-            }
-            .frame(minWidth: 220, idealWidth: 250, maxWidth: 320)
-            Group {
-                if let app = store.apps.first(where: { $0.id == selection }) {
-                    Detail(app: app, store: store, now: now)
-                } else {
-                    VStack(spacing: 8) {
-                        Text(t("选择或拖入一个 App", "Choose or drop an app")).font(.title3)
-                        Text(t("让它只看得到自己的数据", "It sees only its own data")).foregroundStyle(.secondary)
-                    }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(nsColor: .windowBackgroundColor).onTapGesture { selection = nil })
+            } else {
+                VStack(spacing: 10) {
+                    Image(systemName: "square.dashed").font(.system(size: 44, weight: .ultraLight)).foregroundStyle(.tertiary)
+                    Text(t("还没有软件", "No apps yet")).font(.title3.weight(.medium))
+                    Text(t("添加后，它只看得到自己的数据。", "Once added, an app sees only its own data.")).foregroundStyle(.secondary)
+                    Button(t("添加软件…", "Add an App…")) { adding = true }.controlSize(.large).padding(.top, 6)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minWidth: 720, minHeight: 520)
-        .overlay { if dropping { RoundedRectangle(cornerRadius: 8).stroke(Color.accentColor, lineWidth: 3).padding(4) } }
+        .frame(minWidth: 560, minHeight: 420)
+        .navigationTitle(t("结界", "Kekkai"))
+        .searchable(text: $query, placement: .toolbar, prompt: t("搜索", "Search"))
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { adding = true } label: { Label(t("添加软件", "Add App"), systemImage: "plus") }
+                    .help(t("添加软件", "Add an app"))
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button(t("必定隔离的文件夹…", "Always-Blocked Folders…")) { showNever = true }
+                } label: { Label(t("更多", "More"), systemImage: "ellipsis.circle") }
+            }
+        }
+        .inspector(isPresented: Binding(get: { selection != nil }, set: { if !$0 { selection = nil } })) {
+            Group {
+                if let app = store.apps.first(where: { $0.id == selection }) { Detail(app: app, store: store, now: now) }
+            }
+            .inspectorColumnWidth(min: 380, ideal: 440, max: 600)
+        }
+        .overlay { if dropping { RoundedRectangle(cornerRadius: 10).stroke(Color.accentColor, lineWidth: 3).padding(4).allowsHitTesting(false) } }
         .onDrop(of: [UTType.fileURL], isTargeted: $dropping) { providers in
             for p in providers {
                 _ = p.loadObject(ofClass: URL.self) { url, _ in
-                    if let url, url.pathExtension == "app" { Store.shared.open(path: url.path) }
+                    guard let url, url.pathExtension == "app" else { return }
+                    DispatchQueue.main.async {
+                        if let app = store.apps.first(where: { $0.path == url.path && $0.added == true }) { selection = app.id }
+                        else { store.pendingAdd = PendingAdd(path: url.path) }
+                    }
                 }
             }
             return true
         }
+        .sheet(isPresented: $adding) { AddSheet(store: store, initialPath: nil) }
+        .sheet(item: $store.pendingAdd) { AddSheet(store: store, initialPath: $0.path) }
         .sheet(isPresented: $showNever) { NeverSheet(store: store) }
         .onReceive(tick) { now = $0 }
         .onReceive(store.$selected) { if let id = $0 { selection = id } }
         .alert(t("结界", "Kekkai"), isPresented: Binding(get: { store.message != nil }, set: { if !$0 { store.message = nil } })) {
             Button(t("好", "OK"), role: .cancel) {}
         } message: { Text(store.message ?? "") }
+    }
+
+    @ViewBuilder func menu(_ app: AppEntry) -> some View {
+        if app.inside {
+            Button(t("切换到它", "Switch to It")) { store.launch(app) }
+            Button(t("停止", "Stop")) { store.perform(["stop", app.path]) }
+        } else {
+            Button(t("在结界中打开", "Open in Kekkai")) { store.launch(app) }
+        }
+        Button(t("设置…", "Settings…")) { selection = app.id }
+        Divider()
+        Button(t("在“应用程序”中创建入口", "Add a Launcher to Applications")) { store.makeLauncher(app) }
+        if app.hasSpace {
+            Button(t("在访达中显示它的数据", "Show Its Data in Finder")) { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: app.space) }
+        }
+        Divider()
+        Button(t("从结界移除", "Remove from Kekkai")) { store.perform(["remove", app.path]); if selection == app.id { selection = nil } }
     }
 }
 

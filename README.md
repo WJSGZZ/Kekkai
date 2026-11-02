@@ -24,7 +24,7 @@ cd Kekkai
 ./install.sh
 ```
 
-Open `Kekkai.app` in Applications, pick an app from the list (or drag one onto the window), and click **Open in Kekkai**.
+Open `Kekkai.app` in Applications, click **+** at the top right to pick an app, or drag one onto the window. Adding an app is its first trial run: it's added only if it starts properly in Kekkai; if not, Kekkai tells you why and leaves it out, and any permission it can't do without is found along the way. Added apps appear as large icons: double-click one to open it in Kekkai, or click once to see its settings and Block Log on the right.
 
 Quit the app completely before opening it from Kekkai. Copies launched from their own icon or from a web link aren't restricted.
 

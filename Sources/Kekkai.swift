@@ -58,6 +58,7 @@ struct AppEntry: Codable, Identifiable, Equatable {
     var allow: [String]
     var allowOpen: Bool
     var options: [String: Bool]? = nil
+    var autoEnabled: [String]? = nil
     var reviewed: Bool
     let space: String
 }
@@ -281,13 +282,18 @@ struct Detail: View {
                     Toggle(t("钥匙串", "Keychain"), isOn: Binding(
                         get: { !(app.options?["keychain"] ?? false) },
                         set: { v in set(["set", app.id, "keychain", v ? "off" : "on"]) { $0.options?["keychain"] = !v } }))
-                    option("username", t("真实用户名", "Real user name"))
                     option("procinfo", t("其他进程信息", "Other processes"))
                     option("localhost", t("本机端口", "Ports on this Mac"))
                     Toggle(t("打开其他 App 与链接", "Opening other apps and links"), isOn: Binding(
                         get: { app.allowOpen },
                         set: { v in set(["set-open", app.id, v ? "on" : "off"]) { $0.allowOpen = v } }))
                 } header: { Text(t("权限", "Permissions")) } footer: {
+                    let names = ["allow_localhost": t("本机端口", "Ports on this Mac"), "allow_procinfo": t("其他进程信息", "Other processes"), "allow_open": t("打开其他 App 与链接", "Opening other apps and links")]
+                    let auto = (app.autoEnabled ?? []).compactMap { names[$0] }
+                    if !auto.isEmpty {
+                        Text(t("首次运行时自动开启了：\(auto.joined(separator: "、"))。不开它会启动失败。", "Turned on automatically at first launch: \(auto.joined(separator: ", ")). It failed to start without them."))
+                            .foregroundStyle(.orange)
+                    }
                     Text(t("打开即允许。“本机端口”指本机上其他程序开的网络服务，如代理面板、开发服务器。允许打开其他 App 后，被打开的 App 不在结界内。下次打开生效。",
                            "On means allowed. Ports on this Mac are network services opened by other programs here, such as proxy dashboards and dev servers. Apps it opens run outside Kekkai. Changes apply next launch."))
                         .foregroundStyle(.secondary)
@@ -357,6 +363,7 @@ struct LogItem: Codable, Identifiable {
 struct BlockLog: Codable {
     let running: Bool
     var gatekeeper: Bool? = nil
+    var receipt: Bool? = nil
     let started, exited, exitCode: String?
     let seconds: Int?
     let errors: [String]
@@ -447,6 +454,10 @@ struct BlockLogSection: View {
                             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension")!)
                         }
                     }
+                } else if l.receipt == true {
+                    Label(t("这是 App Store 软件，启动时校验购买凭证，结界的副本过不了校验，无法在结界中运行。原版本身已有苹果沙盒，可以直接用原版。",
+                            "This App Store app checks its purchase receipt at launch, and Kekkai's copy can't pass that check, so it can't run in Kekkai. The original already runs in Apple's sandbox, so use it directly."),
+                          systemImage: "bag").foregroundStyle(.orange)
                 } else if let s = l.seconds, s < 60, l.exited != nil {
                     Label(t("打开 \(s) 秒后就退出了（\(l.exitCode ?? "?")）。放行它需要的请求，再打开试试。",
                             "Quit \(s) s after opening (\(l.exitCode ?? "?")). Allow what it needs, then open it again."),

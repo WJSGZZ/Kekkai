@@ -4,6 +4,7 @@
   kekkai run|trial|learn|stop|report|reset|blocked <App.app>
   kekkai blocked <App.app> --json
   kekkai import <App.app>
+  kekkai tune <App.app>
   kekkai launcher <App.app> [名称]
   kekkai list
   kekkai set-tz <bundle id> <时区|->
@@ -11,7 +12,7 @@
   kekkai set-bring-old <bundle id> <on|off>
   kekkai set-block <bundle id> clipboard <on|off>
   kekkai set-open <bundle id> <on|off>
-  kekkai set <bundle id> localhost|procinfo|username|keychain <on|off>
+  kekkai set <bundle id> localhost|procinfo|keychain <on|off>
   kekkai allow <bundle id> add|rm <文件夹>
   kekkai decide <bundle id> allow|deny <操作> <对象>
   kekkai set-location <bundle id> <WGS-84 纬度> <经度> [名称] | -
@@ -127,7 +128,7 @@ def set_field(bundle_id, key, value):
 
 
 # 隔离开关：界面里的名字 → 设置里的键。没设置时用规则文件的默认，再没有就是最严
-OPTIONS = {"localhost": "allow_localhost", "procinfo": "allow_procinfo", "username": "keep_username", "keychain": "block_keychain"}
+OPTIONS = {"localhost": "allow_localhost", "procinfo": "allow_procinfo", "keychain": "block_keychain"}
 
 
 def opt(rule, conf, key):
@@ -220,7 +221,8 @@ def import_container(bundle_id):
 def seed_space(bundle_id, rule, container=False):
     """首次进入时把软件自己的数据用 APFS 克隆放进模拟区域，原文件不动。"""
     space = space_of(bundle_id)
-    fresh = not space.exists()
+    # 副本程序可能先建好了，看数据区里有没有真的数据
+    fresh = not any(p.is_file() for p in (space / "Library").rglob("*")) if (space / "Library").exists() else True
     SPACES.mkdir(parents=True, exist_ok=True)
     os.chmod(SPACES, 0o777 | 0o1000) if SPACES.stat().st_uid == UID else None
     for d in SPACE_DIRS:
@@ -768,7 +770,9 @@ def log_status(app, bundle_id, history):
     # 从网上下载、没经苹果公证的软件，macOS 的门禁在启动时就拦下（实测 OS_REASON_EXEC）；要不要放行是你的决定
     quarantined = subprocess.run(["xattr", "-p", "com.apple.quarantine", app], capture_output=True).returncode == 0
     gatekeeper = bool(exited) and code == "OS_REASON_EXEC" and quarantined
-    return {"running": running, "gatekeeper": gatekeeper, "started": run_start or None, "exited": exited or None, "seconds": seconds,
+    # 退出码 173 是 App Store 软件要求重新校验购买凭证，重签的副本过不了
+    receipt = bool(exited) and code == "173"
+    return {"running": running, "gatekeeper": gatekeeper, "receipt": receipt, "started": run_start or None, "exited": exited or None, "seconds": seconds,
             "exitCode": code if exited else None, "errors": errors, "items": items}
 
 
@@ -855,6 +859,71 @@ def stop(app):
     subprocess.run(["launchctl", "bootout", f"gui/{UID}/{label(bundle_id)}"], capture_output=True)
 
 
+TUNABLE = ["allow_localhost", "allow_procinfo", "allow_open"]
+TUNE_CAT = {"ownport": "allow_localhost", "localhost": "allow_localhost", "proc": "allow_procinfo", "launch": "allow_open"}
+
+
+def tune(app, wait=30):
+    """第一次在结界中打开时在后台试：可选权限全关能撑过 wait 秒就结束；不行就找出缺的是哪一项，只开那一项。
+    先按退出前被挡的请求找；系统日志不一定记下（实测秒退的程序没留日志），找不到就全开再逐项关回去试。
+    只看得出“能不能启动”；登录、粘贴这类功能坏没坏，要你自己用了才知道。"""
+    app = str(Path(app).resolve())
+    bundle_id, _ = info(app)
+    stopped = STATE / f"{bundle_id}.stopped"
+
+    def survives(first=False):
+        """运行一次，撑过 wait 秒返回 True，提前退出返回 False，被你停掉返回 None。"""
+        if not first:
+            stop(app)
+            stopped.unlink(missing_ok=True)
+            if run(app):
+                return False
+        for _ in range(wait):
+            subprocess.run(["sleep", "1"])
+            if not job_state(bundle_id)[0]:
+                return None if stopped.exists() else False
+        return True
+
+    def setting(keys):
+        for k in TUNABLE:
+            set_field(bundle_id, k, True if k in keys else "-")
+
+    start = (STATE / f"{bundle_id}.run-start").read_text().strip()
+    ok = survives(first=True)
+    needed = []
+    if ok is False:
+        subprocess.run(["sleep", "2"])  # 等系统日志写完
+        guess = sorted({TUNE_CAT[c] for c in (categorize(op, tg, app, bundle_id) for _, op, tg in denials(app, start)) if c in TUNE_CAT})
+        if guess:
+            setting(guess)
+            ok = survives()
+            needed = guess if ok else []
+        if not ok and ok is not None:
+            setting(TUNABLE)
+            ok = survives()
+            if ok:
+                needed = list(TUNABLE)
+                for k in TUNABLE:  # 逐项关回去，关了就退出的才是必需的
+                    setting([x for x in needed if x != k])
+                    r = survives()
+                    if r is None:
+                        break
+                    if r:
+                        needed.remove(k)
+                setting(needed)
+                if survives() is False:
+                    setting(TUNABLE)
+                    needed = list(TUNABLE)
+                    survives()
+            else:
+                setting([])  # 全开也不行，原因不在这几项；交给拦截记录里的文件请求
+                needed = []
+    data = settings()
+    data.setdefault(bundle_id, {})["tuned"] = now()
+    data[bundle_id]["auto_enabled"] = needed
+    save_settings(data)
+
+
 def make_launcher(app, name=None):
     """在“应用程序”里做一个从结界打开它的图标，放进程序坞或用聚焦搜索都能用。"""
     app = str(Path(app).resolve())
@@ -906,7 +975,7 @@ def list_apps():
             out.append({"id": bundle_id, "name": app.stem, "path": str(app), "sandboxed": cache[key]["sandboxed"],
                         "perms": [t(PERMISSIONS[k], PERMISSIONS_EN[k]) for k in cache[key]["perm_keys"]], "inside": inside, "running": f"{app}/Contents/MacOS/{exe}" in procs,
                         "tz": c.get("tz"), "mode": effective_mode(bundle_id, c, load_rule(bundle_id)),
-                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c), "location": c.get("location"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "options": {k: opt(load_rule(bundle_id), c, v) for k, v in OPTIONS.items()}, "reviewed": bool(c.get("decided")), "space": str(space), "hasSpace": space.exists()})
+                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c), "location": c.get("location"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "options": {k: opt(load_rule(bundle_id), c, v) for k, v in OPTIONS.items()}, "autoEnabled": c.get("auto_enabled", []), "tuned": bool(c.get("tuned")), "reviewed": bool(c.get("decided")), "space": str(space), "hasSpace": space.exists()})
     STATE.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(cache))
     print(json.dumps(out, ensure_ascii=False))
@@ -949,6 +1018,8 @@ def main():
         if msg:
             sys.exit(msg)
         return
+    if len(a) == 2 and a[0] == "tune":
+        return tune(a[1])
     if len(a) in (2, 3) and a[0] == "launcher":
         return make_launcher(*a[1:])
     if len(a) != 2 or a[0] not in ("run", "learn", "report", "stop", "reset"):
@@ -963,6 +1034,11 @@ def main():
     if msg:
         print(msg)
         sys.exit(1)
+    bundle_id, _ = info(a[1])
+    if a[0] == "run" and not settings().get(bundle_id, {}).get("tuned"):
+        # 第一次打开：后台盯着，必要时自动放开权限重开；不拖住界面
+        subprocess.Popen([str(ROOT / "kekkai"), "tune", a[1]], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 if __name__ == "__main__":

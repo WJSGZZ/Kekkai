@@ -350,6 +350,28 @@ struct Detail: View {
     }
 }
 
+/// 可折叠的一行：点整行（不只是小箭头）就展开或收起
+struct Fold<Label: View, Content: View>: View {
+    @Binding var isOpen: Bool
+    @ViewBuilder let label: Label
+    @ViewBuilder let content: Content
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) { isOpen.toggle() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(isOpen ? 90 : 0))
+                label
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        if isOpen { content.padding(.leading, 18) }
+    }
+}
+
 struct LogItem: Codable, Identifiable {
     var id: String { key }
     let key, op, target, verb, category, last, grant: String
@@ -376,6 +398,7 @@ struct BlockLogSection: View {
     @ObservedObject var store: Store
     @State private var log: BlockLog?
     @State private var changed = false
+    @State private var open: Set<String> = []
 
     func load() async {
         let r = await Task.detached { CLI.call(["blocked", app.path, "--json"]) }.value
@@ -403,7 +426,8 @@ struct BlockLogSection: View {
             if let d = item.decision {
                 Text(d == "allow" ? t("已允许", "Allowed") : t("已拒绝", "Denied")).foregroundStyle(.secondary)
             } else if !item.grant.isEmpty {
-                Button(t("拒绝", "Deny")) { decide(item, "deny") }
+                // 分组里的本来就一直挡着，只需要“允许”；退出前被挡的那几条才要你二选一
+                if item.ask == true { Button(t("拒绝", "Deny")) { decide(item, "deny") } }
                 Button(t("允许", "Allow")) { decide(item, "allow") }
             }
         }
@@ -429,15 +453,15 @@ struct BlockLogSection: View {
         return Text(text).font(.caption.weight(.semibold)).foregroundStyle(color)
     }
     func group(_ title: String, _ items: [LogItem], level: String) -> some View {
-        DisclosureGroup {
-            ForEach(items) { row($0) }
-        } label: {
+        Fold(isOpen: Binding(get: { open.contains(title) }, set: { if $0 { open.insert(title) } else { open.remove(title) } })) {
             HStack(spacing: 6) {
                 Text(title)
                 Text("\(items.count)").foregroundStyle(.secondary)
                 tag(level)
                 if items.contains(where: \.recent) { Text(t("本次运行", "This run")).font(.caption).foregroundStyle(.blue) }
             }
+        } content: {
+            ForEach(items) { row($0) }
         }
     }
 
@@ -464,7 +488,9 @@ struct BlockLogSection: View {
                           systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 }
                 if !l.errors.isEmpty {
-                    DisclosureGroup(t("它自己的日志里有报错（\(l.errors.count)）", "Errors in its own log (\(l.errors.count))")) {
+                    Fold(isOpen: Binding(get: { open.contains("errors") }, set: { if $0 { open.insert("errors") } else { open.remove("errors") } })) {
+                        Text(t("它自己的日志里有报错（\(l.errors.count)）", "Errors in its own log (\(l.errors.count))"))
+                    } content: {
                         ForEach(l.errors, id: \.self) { Text($0).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2) }
                     }
                 }

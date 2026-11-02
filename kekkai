@@ -741,6 +741,13 @@ def blocked(app, quiet=False, as_json=False):
 
 def log_status(app, bundle_id, history):
     """给界面的拦截记录：这次运行的状态、它自己日志里的报错、每条被拦请求和你的决定。"""
+    merged = {}  # 旧记录把本机端口写成 remote:*:端口，和新写法合并
+    for key, e in history.items():
+        k = re.sub(r" remote:\*:", " localhost:", key)
+        m = merged.setdefault(k, {"first": e["first"], "count": 0, "last": e["last"]})
+        m["count"] += e["count"]
+        m["last"] = max(m["last"], e["last"])
+    history = merged
     running, code = job_state(bundle_id)
     run_start = (STATE / f"{bundle_id}.run-start").read_text().strip() if (STATE / f"{bundle_id}.run-start").exists() else ""
     exited_file = STATE / f"{bundle_id}.exited"
@@ -769,7 +776,8 @@ def log_status(app, bundle_id, history):
                       "count": e["count"], "last": e["last"], "recent": bool(run_start) and e["last"] >= run_start,
                       "suspicious": cat in SUSPICIOUS, "normal": cat in NORMAL, "level": CATS[cat][2], "grant": grant_kind(op, target)})
         r = items[-1]  # 等你决定的：可能真需要的；打听类的不当成需要
-        r["ask"] = bool(r["grant"]) and not r["normal"] and (cat in ASKS or crashed and r["recent"] and cat == "appdata")
+        # 只在它异常退出时，把退出前被挡、又能放行的请求列出来让你决定；平时都折在分组里
+        r["ask"] = crashed and r["recent"] and bool(r["grant"]) and not r["normal"] and (cat in ASKS or cat == "appdata")
     # 从网上下载、没经苹果公证的软件，macOS 的门禁在启动时就拦下（实测 OS_REASON_EXEC）；要不要放行是你的决定
     quarantined = subprocess.run(["xattr", "-p", "com.apple.quarantine", app], capture_output=True).returncode == 0
     gatekeeper = bool(exited) and code == "OS_REASON_EXEC" and quarantined

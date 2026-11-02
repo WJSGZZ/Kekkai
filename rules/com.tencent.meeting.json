@@ -1,13 +1,11 @@
 {
-  "names": [
-    "com.tencent.meeting",
-    "com.tencent.wemeet"
-  ],
-  "space_hide_stat": [
-    "Library/Containers/com.tencent.meeting/Data"
-  ],
-  "system_regex": [
-    "^/private/tmp(/[0-9a-f]+)?$",
-    "^~/[0-9a-f]+$"
-  ]
+ "names": [
+  "com.tencent.meeting",
+  "com.tencent.wemeet"
+ ],
+ "system_regex": [
+  "^/private/tmp(/[0-9a-f]+)?$",
+  "^~/[0-9a-f]+$"
+ ],
+ "mode": "real"
 }

@@ -221,8 +221,38 @@ def import_container(bundle_id):
     tmp.rename(dst)
 
 
-def seed_space(bundle_id, rule, container=False):
-    """首次进入时把软件自己的数据用 APFS 克隆放进模拟区域，原文件不动。"""
+def own_sources(app, bundle_id, rule):
+    """它在资料库里的数据：按 ID（含附带的小程序）、名字、声明的群组容器认，和放行规则同一套认法。"""
+    lib = Path(HOME, "Library")
+    ids = sorted({*own_names(bundle_id, rule), *nested_ids(app)})
+    pat = re.compile("^(" + "|".join(re.escape(n) for n in ids) + r")([-._].*)?$")
+    found = []
+    for base in OWN_BASES:
+        if base == "Group Containers" or base in rule.get("skip_seed", []):  # 群组容器按声明认，下面单独加
+            continue
+        d = lib / base
+        if d.is_dir():
+            found += [p for p in d.iterdir() if pat.match(p.name) or base in NAME_BASES and p.name in display_names(app)]
+    found += [lib / "Group Containers" / g for g in app_groups(app) if (lib / "Group Containers" / g).exists()]
+    found += [Path(HOME, hp) for hp in rule.get("home_paths", []) if Path(HOME, hp).exists()]
+    return found
+
+
+def import_own(app, bundle_id, rule):
+    """把它原来的数据用 APFS 克隆放进它的结界文件夹，替换那里的同名数据。原数据不动。"""
+    space = space_of(bundle_id)
+    for src in own_sources(app, bundle_id, rule):
+        dst = space / src.relative_to(HOME)
+        if dst.exists() or dst.is_symlink():
+            shutil.rmtree(dst) if dst.is_dir() and not dst.is_symlink() else dst.unlink()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run(["/bin/cp", "-cR", str(src), str(dst)], capture_output=True, text=True)
+        if r.returncode:
+            return t(f"导入失败：{r.stderr.strip()[:200]}", f"Import failed: {r.stderr.strip()[:200]}")
+
+
+def seed_space(app, bundle_id, rule, container=False):
+    """首次进入时把软件原来的数据用 APFS 克隆放进它的结界文件夹，原数据不动。所有软件同一套做法。"""
     space = space_of(bundle_id)
     # 副本程序可能先建好了，看数据区里有没有真的数据
     fresh = not any(p.is_file() for p in (space / "Library").rglob("*")) if (space / "Library").exists() else True
@@ -233,25 +263,9 @@ def seed_space(bundle_id, rule, container=False):
     os.chmod(space, 0o700)
     for rel in rule.get("space_dirs", []):
         (space / rel).mkdir(parents=True, exist_ok=True)
-    if fresh and container:
-        import_container(bundle_id)  # 自带苹果沙盒的软件：第一次就带上原来的账号和本地数据
-        return
-    if not fresh or not settings().get(bundle_id, {}).get("bring_old_data"):
-        return
-    for name in own_names(bundle_id, rule):
-        for base in OWN_BASES:
-            if base in rule.get("skip_seed", []):
-                continue
-            for src in Path(HOME, "Library", base).glob(name + "*"):
-                dst = space / "Library" / base / src.name
-                if dst.exists():
-                    continue
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                subprocess.run(["cp", "-cR", str(src), str(dst)], capture_output=True)
-        for hp in rule.get("home_paths", []):
-            src = Path(HOME, hp)
-            if src.exists() and not (space / hp).exists():
-                subprocess.run(["cp", "-cR", str(src), str(space / hp)], capture_output=True)
+    if fresh:
+        # 自带苹果沙盒的软件，数据都在它的容器里；其他软件按 ID 和名字认
+        import_container(bundle_id) if container else import_own(app, bundle_id, rule)
 
 
 def ancestors(path):
@@ -386,7 +400,8 @@ def build_profile(app, bundle_id, rule, conf, mode, groups=()):
 
 
 def effective_mode(bundle_id, conf, rule):
-    return conf.get("mode", "real")  # 模拟区域只留给命令行
+    # 所有软件默认在自己的结界文件夹里运行。个别软件用“书签”记住数据文件夹的真实位置，搬走就失效（实测腾讯会议），规则里写 "mode": "real" 原地运行
+    return conf.get("mode", rule.get("mode", "space"))
 
 
 def label(bundle_id):
@@ -504,6 +519,7 @@ CATS = {
     "installs": ("扫描系统级安装内容", "Scanning system-wide installs", "overreach"),
     "appdata": ("查看其他应用的数据", "Looking at other apps' data", "overreach"),
     "apptemp": ("查看其他应用的临时文件", "Looking at other apps' temporary files", "overreach"),
+    "spaces": ("查看其他软件的结界文件夹", "Looking at other apps' Kekkai folders", "overreach"),
     "hidden": ("读取主目录中的隐藏文件", "Reading hidden files in your home folder", "overreach"),
     "localhost": ("探测本机端口", "Probing ports on this Mac", "overreach"),
 }
@@ -575,6 +591,8 @@ def categorize(op, target, app="", bundle_id=""):
         return "apptemp"
     if target in NO_LIST or target.startswith(("/Library/", "/opt/", "/usr/local/")):
         return "installs"
+    if target == str(SPACES) or target.startswith(str(SPACES) + "/"):
+        return "spaces"
     if target.startswith(("/private/tmp", "/Users/Shared")):
         return "sharedtmp"
     if target.startswith(h):
@@ -830,7 +848,7 @@ def run(app, learn=False):
     else:
         sb.write_text(build_profile(app, bundle_id, rule, conf, mode, groups))
         if mode == "space":
-            seed_space(bundle_id, rule, container=sandboxed)
+            seed_space(original, bundle_id, rule, container=sandboxed)
             space = str(space_of(bundle_id))
             cwd = space
             env.update(HOME=space, CFFIXED_USER_HOME=space, TMPDIR=space + "/tmp/", MAC_CHROMIUM_TMPDIR=space + "/tmp/")
@@ -1025,7 +1043,9 @@ def main():
     if len(a) == 2 and a[0] == "import":
         bundle_id, _ = info(a[1])
         stop(a[1])
-        msg = import_container(bundle_id)
+        app = str(Path(a[1]).resolve())
+        sandboxed = bool(entitlements(app).get("com.apple.security.app-sandbox"))
+        msg = import_container(bundle_id) if sandboxed else import_own(app, bundle_id, load_rule(bundle_id))
         if msg:
             sys.exit(msg)
         return

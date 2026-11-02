@@ -254,15 +254,16 @@ struct Detail: View {
                     }
                 } header: { Text(t("允许访问的文件夹", "Allowed folders")) } footer: {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(app.sandboxed
-                             ? t("其他文件一律不可见。此 App 自带苹果沙盒，无法直接放入结界，改用副本运行：设置和数据与原 App 分开，原 App 不受影响。",
-                                 "Everything else stays hidden. This app uses Apple's sandbox and can't run inside Kekkai directly, so a copy runs instead, with its own settings and data. The original app is untouched.")
-                             : t("其他文件一律不可见。", "Everything else stays hidden."))
-                        if app.sandboxed {
+                        Text(app.sandboxed || app.mode == "space"
+                             ? t("其他文件一律不可见。它在自己的结界文件夹里运行：第一次打开时复制了它原来的数据，之后与原 App 分开，原 App 的数据不受影响。",
+                                 "Everything else stays hidden. It runs in its own Kekkai folder: its existing data was copied in at first launch, and from then on it's separate from the original app, whose data stays untouched.")
+                             : t("其他文件一律不可见。它直接使用原来的数据（这个软件用书签记住数据位置，搬走会失效）。",
+                                 "Everything else stays hidden. It uses its existing data in place (this app remembers its data location with a bookmark, which breaks if moved)."))
+                        if app.sandboxed || app.mode == "space" {
                             HStack(spacing: 14) {
                                 Button(t("从原 App 导入数据…", "Import Data from Original…")) { importing = true }
                                 if app.hasSpace {
-                                    Button(t("在访达中显示副本的数据", "Show the Copy's Data in Finder")) {
+                                    Button(t("在访达中显示它的数据", "Show Its Data in Finder")) {
                                         NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: app.space)
                                     }
                                 }
@@ -334,11 +335,11 @@ struct Detail: View {
 
             }
             .formStyle(.grouped)
-            .confirmationDialog(t("用原 App 的数据替换副本的数据？", "Replace the copy's data with the original app's data?"), isPresented: $importing) {
+            .confirmationDialog(t("用原 App 的数据替换它在结界里的数据？", "Replace its data in Kekkai with the original app's data?"), isPresented: $importing) {
                 Button(t("导入", "Import"), role: .destructive) { store.perform(["import", app.path]) }
             } message: {
-                Text(t("副本会先停止。原 App 的数据不动；副本现有的数据会被替换。登录凭据由苹果按签名保管，导入后通常仍需点一次登录。",
-                       "The copy stops first. The original app's data is untouched; the copy's current data is replaced. Sign-in credentials are tied to the app's signature, so you'll usually need to sign in once more."))
+                Text(t("它会先停止。原 App 的数据不动；结界文件夹里的数据会被替换。",
+                       "It stops first. The original app's data is untouched; the data in its Kekkai folder is replaced."))
             }
             .sheet(isPresented: $picking) {
                 LocationPicker(current: app.location) { place in
@@ -433,14 +434,15 @@ struct BlockLogSection: View {
         }
     }
     func order(_ items: [LogItem]) -> [LogItem] {
-        items.sorted { ($0.recent ? 0 : 1, $0.suspicious ? 0 : 1, -$0.count) < ($1.recent ? 0 : 1, $1.suspicious ? 0 : 1, -$1.count) }
+        items.sorted { ($0.recent ? 0 : 1, $0.suspicious ? 0 : 1, -$0.count, $0.key) < ($1.recent ? 0 : 1, $1.suspicious ? 0 : 1, -$1.count, $1.key) }
     }
     /// 等你决定的：可能真需要的（你的文件夹、闪退前被挡的数据），打听类的折进分组
     var pending: [LogItem] { order((log?.items ?? []).filter { $0.ask == true && $0.decision == nil }) }
     /// 其余按档次和类别折叠：越权、留意各按类别分组，常规合成一组
     func groups(_ level: String) -> [(String, [LogItem])] {
         let rest = (log?.items ?? []).filter { $0.level == level && !pending.map(\.key).contains($0.key) }
-        return Dictionary(grouping: rest, by: \.category).map { ($0.key, order($0.value)) }.sorted { $0.1.count > $1.1.count }
+        // 条数相同按名称排，刷新时位置不跳
+        return Dictionary(grouping: rest, by: \.category).map { ($0.key, order($0.value)) }.sorted { ($0.1.count, $1.0) > ($1.1.count, $0.0) }
     }
     var routine: [LogItem] { order((log?.items ?? []).filter { $0.level == "routine" }) }
 

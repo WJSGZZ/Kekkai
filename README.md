@@ -12,7 +12,7 @@
 
 </div>
 
-Some apps scan your home folder, read your clipboard and leave files all over your Mac. Kekkai launches them inside macOS's built-in sandbox. The app keeps using its own data, so you stay signed in and keep your history, but your documents, desktop, downloads and other apps' data simply don't exist as far as it can tell. There's no virtual machine, and the app itself is never modified or re-signed.
+Some apps scan your home folder, read your clipboard and leave files all over your Mac. Kekkai launches them inside macOS's built-in sandbox, with one rule for every app: each app gets its own Kekkai folder, and its existing data is copied in automatically the first time, so you stay signed in and keep your history. From then on it works only inside that folder, and your documents, desktop, downloads and other apps' data simply don't exist as far as it can tell. No virtual machine, and no per-app rules to write.
 
 ## Quick start
 
@@ -30,7 +30,8 @@ Quit the app completely before opening it from Kekkai. Copies launched from thei
 
 ## Features
 
-- **Only its own data.** The app reads and writes its own folders in `~/Library`. Everything else gets "no such file", not "permission denied". That includes Downloads, Desktop, Documents, external drives and other apps' data. In the temp and cache folders every app shares, it sees only its own entries, and its temporary files go into its own folder instead. Its folders are found three ways: the bundle IDs of the app and its bundled helpers and extensions (`com.tencent.qq` and `com.tencent.qq.share` count, `com.tencent.qqmusic` doesn't), the group containers it declares, and folders in the usual data locations named exactly after the app (such as 微信开发者工具).
+- **Lives in its own Kekkai folder.** Each app's data goes in `/Users/Shared/Kekkai/<bundle id>`, and its home folder points there too, so it can't even see your user name in a path. At first launch Kekkai finds the app's existing data three ways and clones it in with APFS (almost no extra space, original untouched): the bundle IDs of the app and its bundled helpers and extensions (`com.tencent.qq` and `com.tencent.qq.share` count, `com.tencent.qqmusic` doesn't), the group containers it declares, and folders in the usual data locations named exactly after the app (such as 微信开发者工具). If something is missed, the app just has a bit less of its own old data; it can't reach anyone else's. After that the app and the original keep separate data; choose Import Data from Original on the detail page to sync again. Everything else gets "no such file", not "permission denied", and in the temp and cache folders every app shares, it sees only its own entries.
+- **A few apps run in place.** Tencent Meeting remembers its data folder with a bookmark that breaks if the folder moves, so it would have to sign in again (tested). Its rule keeps it on its existing data in place, still unable to see anything else.
 - **No peeking at your other apps.** System folders such as `/Applications` and `/Library/Application Support` can't be listed, asking macOS where an app is installed returns nothing, Spotlight returns none of your files, and other processes are hidden.
 - **Folders on request.** If the app needs somewhere to save downloads, allow a folder for it on the detail page. You can remove it any time.
 - **Always-blocked folders.** These override every allowed folder, apply in Learn Mode too, and can't be reached through symlinks. The defaults are `~/.ssh`, `~/.gnupg` and `~/.aws`.
@@ -53,9 +54,9 @@ Tested on macOS 27.2:
 
 | App | Result |
 |---|---|
-| Baidu Netdisk | Starts on its existing data, stays signed in and fetches its file list. Downloads, Desktop and Documents are hidden, and an allowed folder can be read and written |
-| Tencent Meeting | Starts on its existing data. Its Block Log shows that at launch it checks for Chrome, ChatGPT and a test copy of Chrome in `~/.cache`, all blocked |
-| WeChat DevTools | Starts on its existing data and runs without errors |
+| Baidu Netdisk | Runs in its Kekkai folder, stays signed in after its data is copied in, and fetches its file list. Downloads, Desktop and Documents are hidden, and an allowed folder can be read and written |
+| Tencent Meeting | Moved into a Kekkai folder it lost its sign-in (it tracks its data with a bookmark); run in place it stays signed in. Its Block Log shows that at launch it checks for Chrome, ChatGPT and a test copy of Chrome in `~/.cache`, all blocked |
+| WeChat DevTools | Runs in its Kekkai folder with its project history carried over and no errors; with the keychain off it asks you to scan the sign-in code again |
 | QQ, WeChat | The unsandboxed copy reaches the QR sign-in screen, and a 40-second trial run shows no errors. In one session QQ was logged looking at other processes more than 600 times and checking which apps you have 15 times. At launch WeChat tries to list the shared temp and cache folders and is blocked. The copy keeps its own data (see below) |
 
 With the clipboard blocked, the app can't reach the clipboard service at all. This goes further than macOS's own Paste from Other Apps setting, which only asks before an app reads the clipboard on its own.

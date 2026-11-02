@@ -71,7 +71,7 @@ Wrapped directly, these apps crash at launch inside macOS's own sandbox setup, h
 - The original app isn't touched, and opening it from its own icon works as before. When the original updates, the copy is rebuilt on the next launch.
 - The clone takes almost no space. Only the re-signed files use extra disk.
 - The copy is signed differently, so you'll grant camera and microphone access again.
-- After an import, the two don't sync. Opening the original directly uses the original's data, outside Kekkai. To always go through Kekkai, use the arrow next to Open in Kekkai to add a launcher such as "QQ (Kekkai)" to Applications, then keep it in the Dock or open it from Spotlight.
+- After an import, the two don't sync. Opening the original directly uses the original's data, outside Kekkai. To always go through Kekkai, use the arrow next to Open in Kekkai to add a launcher such as "QQ Kekkai" to Applications, then keep it in the Dock or open it from Spotlight.
 - Without Apple's sandbox, the copy is limited only by Kekkai's rules.
 - Apps that check their App Store purchase receipt (tested: Bandizip, exit code 173) can't run as a copy, and Kekkai says why. Use the original for those; it already runs in Apple's sandbox.
 

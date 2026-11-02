@@ -56,6 +56,7 @@ struct AppEntry: Codable, Identifiable, Equatable {
     var location: Place?
     var mode: String
     var allow: [String]
+    var allowOpen: Bool
     let space: String
 }
 
@@ -239,6 +240,9 @@ struct Detail: View {
                 }
 
                 Section {
+                    Toggle(t("允许打开其他软件和链接", "Allow opening other apps and links"), isOn: Binding(
+                        get: { app.allowOpen },
+                        set: { v in set(["set-open", app.id, v ? "on" : "off"]) { $0.allowOpen = v } }))
                     Toggle(t("禁止剪贴板和拖放", "Block clipboard and drag and drop"), isOn: Binding(
                         get: { app.block.contains("clipboard") },
                         set: { v in set(["set-block", app.id, "clipboard", v ? "on" : "off"]) { e in
@@ -258,7 +262,7 @@ struct Detail: View {
                         }
                     }
                 } header: { Text(t("隔离", "Isolation")) } footer: {
-                    Text(t("结界内显示 \(clock(app.tz))。剪贴板关掉后复制、粘贴都不能用。虚拟位置只骗过向系统要定位的软件，按 IP 判断位置的骗不过；开启后会用副本运行。设置会记住，下次打开生效。", "Shows \(clock(app.tz)) inside. With the clipboard blocked, copy and paste stop working. A virtual location fools apps that ask macOS for your location, not ones that use your IP address, and the app runs as a copy. Settings are saved and apply next launch."))
+                    Text(t("结界内显示 \(clock(app.tz))。它拉起的软件不在结界里，所以默认不许它打开其他软件，也不能用浏览器打开链接，要用时再打开。剪贴板关掉后复制、粘贴都不能用。虚拟位置只骗过向系统要定位的软件，按 IP 判断位置的骗不过；开启后会用副本运行。设置会记住，下次打开生效。", "Shows \(clock(app.tz)) inside. Apps it launches run outside Kekkai, so by default it can't open other apps or open links in your browser; turn this on when you need it. With the clipboard blocked, copy and paste stop working. A virtual location fools apps that ask macOS for your location, not ones that use your IP address, and the app runs as a copy. Settings are saved and apply next launch."))
                         .foregroundStyle(.secondary)
                 }
 

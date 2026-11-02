@@ -36,6 +36,7 @@ Quit the app completely before opening it from Kekkai. Copies launched## Feature
 - **Clipboard blocking.** Cut an app off from the clipboard entirely, including drag and drop. Camera, microphone and location are left to macOS, which already controls them per app; the detail page links to the right System Settings pages.
 - **Per-app time zone.** Each app can show its own time zone.
 - **Virtual location.** Search for a place or click the map, and that's the location the app gets whenever it asks macOS. There's no permission prompt, and the real location never reaches the app. In mainland China, the map's GCJ-02 coordinates are converted to the GPS (WGS-84) coordinates apps expect. The app runs as a copy while this is on. Apps that work out your location from your IP address need a proxy instead.
+- **No escaping through other apps.** Apps launched through macOS run outside Kekkai (in testing, a helper launched this way went on to ask for Desktop access). So by default the app can't open other apps or send them automation commands. The catch is that links won't open in your browser; turn on "Allow opening other apps and links" on the detail page when you need that.
 - **Block Log.** Every launch adds what the app tried to reach and was refused, grouped into categories such as "Checking which apps you have" and "Your personal files".
 - **Learn Mode.** Run an app once without isolation to log which outside paths it touches. Useful when writing rules for unusual apps.
 
@@ -65,6 +66,17 @@ Wrapped directly, these apps crash at launch inside macOS's own sandbox setup, h
 
 ple's sandbox, the copy is limited only by Kekkai's rules.
 
+## Compared with Apple's App Sandbox
+
+Both use the same macOS sandbox engine, but the rules work in opposite directions:
+
+- **Apple's App Sandbox** blocks everything by default and opens only what the app declares, such as network access, the camera, or files you pick. The developer decides whether to use it, and most apps from mainland China don't (on this Mac only QQ and WeChat do).
+- **Kekkai** allows by default, then blocks the parts that matter: files, process information and launching other apps. It works on any app without the developer's help. The trade-off is that anything not explicitly blocked stays open, including the network, Bluetooth, USB and most system services.
+
+So:
+- For apps with no sandbox, like Baidu Netdisk and Tencent Meeting, Kekkai goes from nothing to a lot and is clearly stricter.
+- For apps that already have Apple's sandbox, like QQ and WeChat, Kekkai's copy removes it, so the result isn't strictly stronger. Kekkai adds a hidden Downloads folder, hidden processes, the Block Log and virtual location, but loses Apple's "nothing unless declared" baseline. Unless you need a virtual location or want Downloads hidden, the original app is fine.
+
 ## Command line
 
 The interface runs a Python script installed at `~/Library/Application Support/Kekkai/bin/kekkai`:
@@ -75,6 +87,7 @@ kekkai list
 kekkai allow <bundle id> add|rm <folder>
 kekkai set-tz <bundle id> <time zone|->
 kekkai set-block <bundle id> clipboard <on|off>
+kekkai set-open <bundle id> <on|off>
 kekkai set-location <bundle id> <latitude> <longitude> [name] | -
 kekkai never list|add|rm [path]
 ```

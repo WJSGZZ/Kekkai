@@ -7,6 +7,7 @@
   kekkai set-mode <bundle id> <space|real>
   kekkai set-bring-old <bundle id> <on|off>
   kekkai set-block <bundle id> clipboard <on|off>
+  kekkai set-open <bundle id> <on|off>
   kekkai allow <bundle id> add|rm <文件夹>
   kekkai set-location <bundle id> <WGS-84 纬度> <经度> [名称] | -
   kekkai never list|add|rm [路径]
@@ -241,6 +242,9 @@ def common_rules(rule, conf):
     if not rule.get("keep_username"):
         L += [";; 挡住目录服务，软件查不到真实用户名",
               "(deny mach-lookup", *[f"  (global-name {q(x)})" for x in DIRECTORY_SERVICES], ")"]
+    if not conf.get("allow_open"):
+        # 经系统拉起的软件不在结界里，挡住它就挡住了借别的软件逃出去的路；代价是不能用浏览器打开链接
+        L += [";; 不许拉起其他软件、不许给其他软件发自动化指令", "(deny lsopen)", "(deny appleevent-send)"]
     # 运行中的软件列表来自 launchservicesd，挡住它图形软件就启动不了，所以只挡进程信息
     L += [";; 看不到其他进程", "(deny process-info* (target others))", "(deny process-info-listpids)"]
     if rule.get("block_keychain"):
@@ -428,7 +432,7 @@ def categorize(op, target, app=""):
     return t("其他", "Other")
 
 
-def blocked(app):
+def blocked(app, quiet=False):
     """从系统日志里取出结界拦下的请求，并入这个软件的长期记录。"""
     app = str(Path(app).resolve())
     bundle_id, _ = info(app)
@@ -469,7 +473,8 @@ def blocked(app):
         lines.append(t("还没有记录。在结界中打开它用一会儿再来看。", "Nothing yet. Open it in Kekkai, use it for a while, then check again."))
     out = STATE / f"{bundle_id}-blocked.txt"
     out.write_text("\n".join(lines) + "\n")
-    print(out)
+    if not quiet:
+        print(out)
 
 
 def isChinese():
@@ -492,7 +497,7 @@ def run(app, learn=False):
     STATE.mkdir(parents=True, exist_ok=True)
     started = STATE / f"{bundle_id}.started"
     if started.exists():
-        blocked(original)  # 先把上一次的拦截存进长期记录
+        blocked(original, quiet=True)  # 先把上一次的拦截存进长期记录
     started.write_text(subprocess.run(["date", "+%Y-%m-%d %H:%M:%S"], capture_output=True, text=True).stdout.strip())
     env = {"TZ": conf["tz"]} if conf.get("tz") else {}
     cwd = "/"
@@ -578,7 +583,7 @@ def list_apps():
             out.append({"id": bundle_id, "name": app.stem, "path": str(app), "sandboxed": cache[key]["sandboxed"],
                         "perms": [t(PERMISSIONS[k], PERMISSIONS_EN[k]) for k in cache[key]["perm_keys"]], "inside": inside, "running": f"{app}/Contents/MacOS/{exe}" in procs,
                         "tz": c.get("tz"), "mode": effective_mode(bundle_id, c, load_rule(bundle_id)),
-                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c), "location": c.get("location"), "allow": c.get("allow", []), "space": str(space), "hasSpace": space.exists()})
+                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c), "location": c.get("location"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "space": str(space), "hasSpace": space.exists()})
     STATE.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(cache))
     print(json.dumps(out, ensure_ascii=False))
@@ -598,6 +603,8 @@ def main():
         return set_allow(a[1], a[2], a[3])
     if a[:1] == ["set-location"] and (a[2:] == ["-"] or len(a) >= 4):
         return set_location(a[1], a[2:])
+    if len(a) == 3 and a[0] == "set-open" and a[2] in ("on", "off"):
+        return set_field(a[1], "allow_open", True if a[2] == "on" else "-")
     if len(a) == 4 and a[0] == "set-block" and a[2] in DEVICES and a[3] in ("on", "off"):
         return set_block(a[1], a[2], a[3] == "on")
     if a[:1] == ["never"] and (a[1:] == ["list"] or (len(a) == 3 and a[1] in ("add", "rm"))):

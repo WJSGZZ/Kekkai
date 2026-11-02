@@ -1,0 +1,404 @@
+#!/usr/bin/python3 -I
+"""结界 Kekkai：让 macOS App 只看得到自己的文件。
+用法:
+  kekkai run|learn|stop|report|reset <App.app>
+  kekkai list
+  kekkai set-tz <bundle id> <时区|->
+  kekkai set-mode <bundle id> <space|real>
+  kekkai set-bring-old <bundle id> <on|off>
+  kekkai set-block <bundle id> <camera|microphone|clipboard|location> <on|off>
+  kekkai never list|add|rm [路径]
+"""
+import json, os, plistlib, re, shutil, subprocess, sys
+from pathlib import Path
+
+HOME = str(Path.home())
+UID = os.getuid()
+ROOT = Path(__file__).resolve().parent
+STATE = Path(HOME, "Library/Application Support/Kekkai")
+SPACES = Path("/Users/Shared/Kekkai")
+SHARE = Path(HOME, "KekkaiShare")
+OWN_BASES = ["Application Support", "Caches", "Preferences", "Logs", "HTTPStorages", "WebKit", "Cookies",
+             "Saved Application State", "Containers", "Group Containers", "Application Scripts"]
+BLOCKED = [HOME, "/Users/Shared", "/Applications", "/Volumes", "/private/tmp"]
+NO_EXEC = ["/bin/launchctl", "/usr/bin/open", "/usr/bin/osascript"]
+DIRECTORY_SERVICES = ["com.apple.system.opendirectoryd.libinfo", "com.apple.system.opendirectoryd.api",
+                      "com.apple.system.opendirectoryd.membership", "com.apple.system.DirectoryService.libinfo_v1"]
+DEFAULT_NEVER = [f"{HOME}/.ssh", f"{HOME}/.gnupg", f"{HOME}/.aws"]
+# 可按 App 关掉的设备和服务；定位默认关
+DEVICES = {
+    "camera": ["(deny device-camera)"],
+    "microphone": ["(deny device-microphone)"],
+    "clipboard": ['(deny mach-lookup (global-name "com.apple.pasteboard.1"))'],
+    "location": ['(deny mach-lookup (global-name-regex #"^com\\.apple\\.locationd\\."))'],
+}
+DEFAULT_BLOCK = ["location"]
+SPACE_DIRS = ["Library/Application Support", "Library/Caches", "Library/Preferences", "Library/Logs",
+              "Downloads", "Documents", "Desktop", "tmp"]
+PERMISSIONS_EN = {
+    "com.apple.security.files.downloads.read-write": "Read and write Downloads",
+    "com.apple.security.files.user-selected.read-write": "Read and write files you choose",
+    "com.apple.security.files.user-selected.read-only": "Read files you choose",
+    "com.apple.security.files.bookmarks.app-scope": "Remember files you chose",
+    "com.apple.security.device.camera": "Camera (asks first)",
+    "com.apple.security.device.audio-input": "Microphone (asks first)",
+    "com.apple.security.personal-information.location": "Location (asks first)",
+    "com.apple.security.personal-information.photos-library": "Photos (asks first)",
+    "com.apple.security.personal-information.addressbook": "Contacts (asks first)",
+    "com.apple.security.network.client": "Network access",
+    "com.apple.security.network.server": "Accept network connections",
+    "com.apple.security.print": "Printing",
+}
+PERMISSIONS = {
+    "com.apple.security.files.downloads.read-write": "读写下载文件夹",
+    "com.apple.security.files.user-selected.read-write": "读写你手动选的文件",
+    "com.apple.security.files.user-selected.read-only": "读取你手动选的文件",
+    "com.apple.security.files.bookmarks.app-scope": "记住你选过的文件",
+    "com.apple.security.device.camera": "摄像头（首次要你同意）",
+    "com.apple.security.device.audio-input": "麦克风（首次要你同意）",
+    "com.apple.security.personal-information.location": "定位（首次要你同意）",
+    "com.apple.security.personal-information.photos-library": "照片（首次要你同意）",
+    "com.apple.security.personal-information.addressbook": "通讯录（首次要你同意）",
+    "com.apple.security.network.client": "联网",
+    "com.apple.security.network.server": "接受网络连接",
+    "com.apple.security.print": "打印",
+}
+
+
+def t(zh, en):
+    return zh if os.environ.get("KEKKAI_LANG", "zh") == "zh" else en
+
+
+def q(s):
+    return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def info(app):
+    plist = plistlib.load(open(Path(app, "Contents/Info.plist"), "rb"))
+    bundle_id = plist["CFBundleIdentifier"]
+    if bundle_id == "com.github.Electron":  # 有的软件没改 Electron 的默认 id，按 App 名区分
+        bundle_id += "." + re.sub(r"[^A-Za-z0-9.-]", "-", Path(app).stem)
+    return bundle_id, plist["CFBundleExecutable"]
+
+
+def load_rule(bundle_id):
+    p = ROOT / "rules" / f"{bundle_id}.json"
+    return json.loads(p.read_text()) if p.exists() else {}
+
+
+def entitlements(app):
+    r = subprocess.run(["codesign", "-d", "--entitlements", "-", "--xml", app], capture_output=True)
+    try:
+        return plistlib.loads(r.stdout) if r.stdout else {}
+    except Exception:
+        return {}
+
+
+def settings():
+    p = STATE / "settings.json"
+    return json.loads(p.read_text()) if p.exists() else {}
+
+
+def save_settings(data):
+    STATE.mkdir(parents=True, exist_ok=True)
+    (STATE / "settings.json").write_text(json.dumps(data, ensure_ascii=False, indent=1))
+
+
+def set_field(bundle_id, key, value):
+    data = settings()
+    entry = data.setdefault(bundle_id, {})
+    if value == "-":
+        entry.pop(key, None)
+    else:
+        entry[key] = value
+    save_settings(data)
+
+
+def set_tz(bundle_id, tz):
+    if tz != "-" and not Path("/usr/share/zoneinfo", tz).is_file():
+        sys.exit(t(f"未知时区：{tz}", f"Unknown time zone: {tz}"))
+    set_field(bundle_id, "tz", tz)
+
+
+def never_list():
+    data = settings()
+    return data.get("_never", DEFAULT_NEVER)
+
+
+def never_cmd(action, path=None):
+    items = list(never_list())
+    if action == "add":
+        real = str(Path(path).expanduser().resolve())
+        if real not in items:
+            items.append(real)
+    elif action == "rm":
+        real = str(Path(path).expanduser().resolve())
+        items = [x for x in items if x != real and x != path]
+    if action != "list":
+        data = settings()
+        data["_never"] = items
+        save_settings(data)
+    print(json.dumps(items, ensure_ascii=False))
+
+
+def never_rules():
+    # 放在规则最后，优先级高于任何放行
+    items = [str(Path(p).resolve()) for p in never_list()]
+    return ["(deny file-read* file-write* (with errno 2)", *[f"  (subpath {q(p)})" for p in items], ")"] if items else []
+
+
+def space_of(bundle_id):
+    return SPACES / bundle_id
+
+
+def own_names(bundle_id, rule):
+    return sorted({bundle_id, *rule.get("names", [])})
+
+
+def seed_space(bundle_id, rule):
+    """首次进入时把软件自己的数据用 APFS 克隆放进模拟区域，原文件不动。"""
+    space = space_of(bundle_id)
+    fresh = not space.exists()
+    SPACES.mkdir(parents=True, exist_ok=True)
+    os.chmod(SPACES, 0o777 | 0o1000) if SPACES.stat().st_uid == UID else None
+    for d in SPACE_DIRS:
+        (space / d).mkdir(parents=True, exist_ok=True)
+    os.chmod(space, 0o700)
+    for rel in rule.get("space_dirs", []):
+        (space / rel).mkdir(parents=True, exist_ok=True)
+    if not fresh or not settings().get(bundle_id, {}).get("bring_old_data"):
+        return
+    for name in own_names(bundle_id, rule):
+        for base in OWN_BASES:
+            if base in rule.get("skip_seed", []):
+                continue
+            for src in Path(HOME, "Library", base).glob(name + "*"):
+                dst = space / "Library" / base / src.name
+                if dst.exists():
+                    continue
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                subprocess.run(["cp", "-cR", str(src), str(dst)], capture_output=True)
+        for hp in rule.get("home_paths", []):
+            src = Path(HOME, hp)
+            if src.exists() and not (space / hp).exists():
+                subprocess.run(["cp", "-cR", str(src), str(space / hp)], capture_output=True)
+
+
+def ancestors(path):
+    return [str(p) for p in Path(path).parents if str(p) != "/"]
+
+
+def blocked_devices(conf):
+    return [d for d in DEVICES if conf.get("block", DEFAULT_BLOCK).count(d)]
+
+
+def set_block(bundle_id, device, on):
+    data = settings()
+    entry = data.setdefault(bundle_id, {})
+    items = [d for d in entry.get("block", DEFAULT_BLOCK) if d != device] + ([device] if on else [])
+    entry["block"] = sorted(items)
+    save_settings(data)
+
+
+def common_rules(rule, conf):
+    L = [";; 不许借系统工具跑到结界外",
+         "(deny process-exec", *[f"  (literal {q(x)})" for x in NO_EXEC], ")"]
+    if not rule.get("keep_username"):
+        L += [";; 挡住目录服务，软件查不到真实用户名",
+              "(deny mach-lookup", *[f"  (global-name {q(x)})" for x in DIRECTORY_SERVICES], ")"]
+    if rule.get("block_keychain"):
+        L += [";; 挡住钥匙串，代价是依赖钥匙串的登录会失效",
+              '(deny mach-lookup (global-name "com.apple.securityd.xpc") (global-name "com.apple.SecurityServer") (global-name "com.apple.secd.keychain"))']
+    for d in blocked_devices(conf):
+        L += DEVICES[d]
+    return L
+
+
+def build_profile(app, bundle_id, rule, conf, mode):
+    L = ["(version 1)", "(allow default)", ";; 被挡的路径一律显示为不存在",
+         "(deny file-read* file-write* (with errno 2)", *[f"  (subpath {q(b)})" for b in BLOCKED], ")",
+         '(deny file-read-data (with errno 2) (literal "/Users"))']
+    system = [f"(subpath {q(x)})" for x in rule.get("system_paths", [])]
+    L.append(f"(allow file-read* (subpath {q(app)}))")
+    if mode == "space":
+        space = str(space_of(bundle_id))
+        L += [";; 所有改动都落在模拟区域",
+              "(allow file-read-metadata", *[f"  (literal {q(p)})" for p in ancestors(space)],
+              '  (literal "/Applications") (literal "/Volumes"))',
+              "(allow file-read* file-write*", f"  (subpath {q(space)})", *["  " + s for s in system], ")"]
+        # 有的软件启动时发现旧数据目录就要授权，让这一步看到“目录不存在”
+        hide = [f"  (literal {q(os.path.join(space, x))})" for x in rule.get("space_hide_stat", [])]
+        if hide:
+            L += ["(deny file-read-metadata (with errno 2)", *hide, ")"]
+    else:
+        names = own_names(bundle_id, rule)
+        own = [f'(regex #"^{re.escape(HOME)}/Library/([^/]+/)?{re.escape(n)}[^/]*(/.*)?$")' for n in names]
+        extra = [f"(subpath {q(os.path.join(HOME, x))})" for x in rule.get("home_paths", [])]
+        share = SHARE / Path(app).stem
+        parents = sorted({"/Users", HOME, f"{HOME}/Library", "/Applications", "/Volumes", str(SHARE),
+                          *(f"{HOME}/Library/{b}" for b in OWN_BASES)})
+        L += ["(allow file-read-metadata", *[f"  (literal {q(p)})" for p in parents], ")",
+              "(allow file-read* file-write*", *["  " + o for o in own], *["  " + x for x in extra],
+              f"  (subpath {q(str(share))})", *["  " + s for s in system], ")",
+              f"(allow file-read* (literal {q(HOME + '/.CFUserTextEncoding')}))",
+              f"(allow file-read-metadata (subpath {q(HOME + '/Library/Keychains')}))"]
+    return "\n".join(L + common_rules(rule, conf) + never_rules()) + "\n"
+
+
+def effective_mode(bundle_id, conf, rule):
+    return conf.get("mode", "space")
+
+
+def label(bundle_id):
+    return f"io.github.wjsgzz.kekkai.{bundle_id}"
+
+
+LEARN_PROFILE = "(version 1)\n(allow default)\n(allow file-read* file-write* (with report))\n"
+INTERESTING = (HOME + "/", "/Users/Shared", "/Volumes/", "/Applications/", "/private/tmp/")
+
+
+def report(app):
+    app = str(Path(app).resolve())
+    bundle_id, _ = info(app)
+    start = (STATE / f"{bundle_id}.learn-start").read_text().strip()
+    r = subprocess.run(["/usr/bin/log", "show", "--start", start, "--style", "compact", "--predicate",
+                        'senderImagePath CONTAINS "Sandbox" AND eventMessage CONTAINS " allow file-"'],
+                       capture_output=True, text=True, errors="replace")
+    seen = {}
+    for line in r.stdout.splitlines():
+        m = re.search(r" allow file-(read|write)[^ ]* (/.*)$", line)
+        if not m or m[2].startswith(app + "/") or not m[2].startswith(INTERESTING):
+            continue
+        parts = m[2].split("/")
+        key = "/".join(parts[:7 if m[2].startswith(HOME + "/Library/") else 5])
+        seen.setdefault(key, set()).add(m[1])
+    lines = [f"{t('读写', 'R/W') if len(v) > 1 else (t('写', 'W') if 'write' in v else t('读', 'R'))}  {k}" for k, v in sorted(seen.items())]
+    head = t(f"{Path(app).stem} 从 {start} 起碰过的外部路径（共 {len(lines)} 组，系统日志可能合并或遗漏）：",
+             f"Outside paths {Path(app).stem} touched since {start} ({len(lines)} groups; the system log may merge or drop entries):")
+    text = head + "\n" + "\n".join(lines) + "\n"
+    out = STATE / f"{bundle_id}-report.txt"
+    out.write_text(text)
+    print(out)
+
+
+def run(app, learn=False):
+    app = str(Path(app).resolve())
+    bundle_id, exe = info(app)
+    if entitlements(app).get("com.apple.security.app-sandbox"):
+        return t(f"{Path(app).stem} 自带苹果沙盒，再套一层会崩溃（微信已实测）。它能碰什么，请看界面里的权限清单。", f"{Path(app).stem} has Apple's own sandbox, and adding another layer would crash it. See its permission list in the app.")
+    binary = f"{app}/Contents/MacOS/{exe}"
+    if subprocess.run(["pgrep", "-f", "^" + re.escape(binary)], capture_output=True).returncode == 0:
+        return t(f"{Path(app).stem} 已在运行。请先完全退出，再放进结界。", f"{Path(app).stem} is already running. Quit it completely first.")
+    rule, conf = load_rule(bundle_id), settings().get(bundle_id, {})
+    mode = effective_mode(bundle_id, conf, rule)
+    STATE.mkdir(parents=True, exist_ok=True)
+    env = {"TZ": conf["tz"]} if conf.get("tz") else {}
+    cwd = "/"
+    sb = STATE / f"{bundle_id}.sb"
+    if learn:
+        sb.write_text(LEARN_PROFILE + "\n".join(never_rules()) + "\n")
+        stamp = subprocess.run(["date", "+%Y-%m-%d %H:%M:%S"], capture_output=True, text=True).stdout.strip()
+        (STATE / f"{bundle_id}.learn-start").write_text(stamp)
+    else:
+        sb.write_text(build_profile(app, bundle_id, rule, conf, mode))
+        if mode == "space":
+            seed_space(bundle_id, rule)
+            space = str(space_of(bundle_id))
+            cwd = space
+            env.update(HOME=space, CFFIXED_USER_HOME=space, TMPDIR=space + "/tmp/")
+            if not rule.get("keep_prefs_service"):
+                env["__CFPREFERENCES_AVOID_DAEMON"] = "1"  # 偏好设置直接读写模拟区域，不经系统服务
+        else:
+            cwd = str(SHARE / Path(app).stem)
+            Path(cwd).mkdir(parents=True, exist_ok=True)
+        if not rule.get("keep_username"):
+            env.update(USER="user", LOGNAME="user")
+    args = ["/usr/bin/sandbox-exec", "-f", str(sb), binary]
+    if Path(app, "Contents/Frameworks/Electron Framework.framework").exists():
+        args.append("--no-sandbox")  # Electron 自带沙盒不能嵌套
+    args += rule.get("args", [])
+    job = STATE / f"{label(bundle_id)}.plist"
+    plistlib.dump({"Label": label(bundle_id), "ProgramArguments": args, "RunAtLoad": True, "KeepAlive": False,
+                   "WorkingDirectory": cwd, "ProcessType": "Interactive", "LimitLoadToSessionType": "Aqua",
+                   "StandardErrorPath": str(STATE / f"{bundle_id}.log"), "StandardOutPath": "/dev/null",
+                   "EnvironmentVariables": env}, open(job, "wb"))
+    subprocess.run(["launchctl", "bootout", f"gui/{UID}/{label(bundle_id)}"], capture_output=True)
+    r = subprocess.run(["launchctl", "bootstrap", f"gui/{UID}", str(job)], capture_output=True, text=True)
+    return None if r.returncode == 0 else t(f"启动失败：{r.stderr.strip()}", f"Launch failed: {r.stderr.strip()}")
+
+
+def stop(app):
+    bundle_id, _ = info(app)
+    subprocess.run(["launchctl", "bootout", f"gui/{UID}/{label(bundle_id)}"], capture_output=True)
+
+
+def reset(app):
+    """丢弃模拟区域里的全部改动，下次打开时重新从真实数据克隆。"""
+    bundle_id, _ = info(app)
+    stop(app)
+    space = space_of(bundle_id)
+    if space.parent == SPACES and space.exists():
+        shutil.rmtree(space)
+
+
+def list_apps():
+    cache_path = STATE / "entitlements-cache.json"
+    cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
+    procs = subprocess.run(["ps", "-axo", "comm="], capture_output=True, text=True).stdout
+    jobs = subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout
+    conf, out = settings(), []
+    for base in ("/Applications", f"{HOME}/Applications"):
+        for app in sorted(Path(base).glob("*.app")):
+            try:
+                bundle_id, exe = info(app)
+            except (OSError, KeyError, plistlib.InvalidFileException):
+                continue
+            if bundle_id == "io.github.wjsgzz.kekkai":
+                continue
+            key = f"{app}:{Path(app, 'Contents/Info.plist').stat().st_mtime}"
+            if "perm_keys" not in (cache.get(key) if isinstance(cache.get(key), dict) else {}):
+                e = entitlements(str(app))
+                cache[key] = {"sandboxed": bool(e.get("com.apple.security.app-sandbox")),
+                              "perm_keys": [k for k in PERMISSIONS if e.get(k)]}
+            inside = any(label(bundle_id) == ln.split("\t")[-1] and not ln.startswith("-") for ln in jobs.splitlines())
+            c = conf.get(bundle_id, {})
+            space = space_of(bundle_id)
+            out.append({"id": bundle_id, "name": app.stem, "path": str(app), "sandboxed": cache[key]["sandboxed"],
+                        "perms": [t(PERMISSIONS[k], PERMISSIONS_EN[k]) for k in cache[key]["perm_keys"]], "inside": inside, "running": f"{app}/Contents/MacOS/{exe}" in procs,
+                        "tz": c.get("tz"), "mode": effective_mode(bundle_id, c, load_rule(bundle_id)),
+                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c), "space": str(space), "hasSpace": space.exists()})
+    STATE.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(cache))
+    print(json.dumps(out, ensure_ascii=False))
+
+
+def main():
+    a = sys.argv[1:]
+    if a == ["list"]:
+        return list_apps()
+    if len(a) == 3 and a[0] == "set-tz":
+        return set_tz(a[1], a[2])
+    if len(a) == 3 and a[0] == "set-mode" and a[2] in ("space", "real"):
+        return set_field(a[1], "mode", a[2])
+    if len(a) == 3 and a[0] == "set-bring-old" and a[2] in ("on", "off"):
+        return set_field(a[1], "bring_old_data", True if a[2] == "on" else "-")
+    if len(a) == 4 and a[0] == "set-block" and a[2] in DEVICES and a[3] in ("on", "off"):
+        return set_block(a[1], a[2], a[3] == "on")
+    if a[:1] == ["never"] and (a[1:] == ["list"] or (len(a) == 3 and a[1] in ("add", "rm"))):
+        return never_cmd(*a[1:])
+    if len(a) != 2 or a[0] not in ("run", "learn", "report", "stop", "reset"):
+        sys.exit(__doc__)
+    if a[0] == "stop":
+        return stop(a[1])
+    if a[0] == "reset":
+        return reset(a[1])
+    if a[0] == "report":
+        return report(a[1])
+    msg = run(a[1], learn=a[0] == "learn")
+    if msg:
+        print(msg)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

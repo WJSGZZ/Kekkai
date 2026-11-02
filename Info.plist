@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>io.github.wjsgzz.kekkai</string>
+<key>CFBundleName</key><string>Kekkai</string>
+<key>CFBundleDisplayName</key><string>Kekkai</string>
+<key>LSHasLocalizedDisplayName</key><true/>
+<key>CFBundleDevelopmentRegion</key><string>en</string>
+<key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
+<key>CFBundleIconFile</key><string>AppIcon</string>
+<key>CFBundleExecutable</key><string>Kekkai</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.1</string>
+<key>LSMinimumSystemVersion</key><string>14.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>CFBundleDocumentTypes</key><array><dict>
+<key>CFBundleTypeName</key><string>App</string><key>CFBundleTypeRole</key><string>Viewer</string>
+<key>LSItemContentTypes</key><array><string>com.apple.application-bundle</string></array>
+</dict></array>
+</dict></plist>

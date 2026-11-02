@@ -1,7 +1,7 @@
 #!/usr/bin/python3 -I
 """结界 Kekkai：让 macOS App 只看得到自己的文件。
 用法:
-  kekkai run|learn|stop|report|reset <App.app>
+  kekkai run|learn|stop|report|reset|blocked <App.app>
   kekkai list
   kekkai set-tz <bundle id> <时区|->
   kekkai set-mode <bundle id> <space|real>
@@ -31,6 +31,7 @@ DEVICES = {
     "clipboard": ['(deny mach-lookup (global-name "com.apple.pasteboard.1"))'],
 }
 DEFAULT_BLOCK = []
+NAME_BASES = ["Application Support", "Caches", "Logs", "HTTPStorages", "WebKit", "Saved Application State"]
 SPACE_DIRS = ["Library/Application Support", "Library/Caches", "Library/Preferences", "Library/Logs",
               "Downloads", "Documents", "Desktop", "tmp"]
 PERMISSIONS_EN = {
@@ -161,6 +162,18 @@ def display_names(app):
     return sorted(n for n in found if isinstance(n, str) and n.strip() and "/" not in n and n != "Electron")
 
 
+def nested_ids(app):
+    """App 里附带的小程序和扩展，如 QQ 的 com.tencent.qqexdoc。"""
+    ids = set()
+    for p in Path(app, "Contents").rglob("Info.plist"):
+        if p.parent.name == "Contents" and p.parent.parent.suffix in (".app", ".appex", ".xpc"):
+            try:
+                ids.add(plistlib.load(open(p, "rb"))["CFBundleIdentifier"])
+            except Exception:
+                pass
+    return ids
+
+
 def own_names(bundle_id, rule):
     return sorted({bundle_id, *rule.get("names", [])})
 
@@ -228,6 +241,8 @@ def common_rules(rule, conf):
     if not rule.get("keep_username"):
         L += [";; 挡住目录服务，软件查不到真实用户名",
               "(deny mach-lookup", *[f"  (global-name {q(x)})" for x in DIRECTORY_SERVICES], ")"]
+    # 运行中的软件列表来自 launchservicesd，挡住它图形软件就启动不了，所以只挡进程信息
+    L += [";; 看不到其他进程", "(deny process-info* (target others))", "(deny process-info-listpids)"]
     if rule.get("block_keychain"):
         L += [";; 挡住钥匙串，代价是依赖钥匙串的登录会失效",
               '(deny mach-lookup (global-name "com.apple.securityd.xpc") (global-name "com.apple.SecurityServer") (global-name "com.apple.secd.keychain"))']
@@ -268,9 +283,12 @@ def build_profile(app, bundle_id, rule, conf, mode, groups=()):
               "(allow file-read* file-write*", f"  (subpath {q(space)})", *["  " + s for s in system], ")"]
     else:
         names = own_names(bundle_id, rule)
-        own = [f'(regex #"^{re.escape(HOME)}/Library/([^/]+/)?{re.escape(n)}[^/]*(/.*)?$")' for n in names]
-        # 按名字只放行同名文件夹，不放行前缀相同的（如 QQ 不放行 QQMusic）
-        own += [f'(regex #"^{re.escape(HOME)}/Library/([^/]+/)?{re.escape(n)}(/.*)?$")' for n in display_names(app)]
+        # 按 ID 放行 com.tencent.qq 和 com.tencent.qq.share 这类，不放行 com.tencent.qqmusic
+        names = sorted({*names, *nested_ids(app)})
+        own = [f'(regex #"^{re.escape(HOME)}/Library/([^/]+/)?{re.escape(n)}([-._][^/]*)?(/.*)?$")' for n in names]  # 沙盒正则把 [._-] 当范围，连字符要放最前
+        # 按名字只在常见数据目录里放行同名文件夹，避免名字叫 Mail 的软件碰到 ~/Library/Mail
+        bases = "|".join(re.escape(b) for b in NAME_BASES)
+        own += [f'(regex #"^{re.escape(HOME)}/Library/({bases})/{re.escape(n)}(/.*)?$")' for n in display_names(app)]
         extra = [f"(subpath {q(os.path.join(HOME, x))})" for x in rule.get("home_paths", [])]
         extra += [f"(subpath {q(f'{HOME}/Library/Group Containers/{g}')})" for g in groups]
         approved = allowed_dirs(conf)
@@ -367,8 +385,99 @@ def local_copy(app, bundle_id):
     return str(dst)
 
 
-def run(app, learn=False):
+def verb(op):
+    if op.startswith("file-write"):
+        return t("写", "write")
+    if op == "file-read-metadata":
+        return t("查", "check")
+    if op.startswith("file-read"):
+        return t("读", "read")
+    return t("连", "call") if op == "mach-lookup" else t("看", "view")
+
+
+NORMAL = ("查你的真实用户名", "Looking up your real user name", "连接系统服务", "Connecting to system services")
+
+
+def categorize(op, target, app=""):
+    """把一条拦截归到人能看懂的类别。"""
+    h = HOME + "/"
+    if app and target.startswith(app + "/"):
+        return t("改动自己的安装目录", "Changing its own app bundle")
+    if op.startswith("process-info"):
+        return t("查看其他进程", "Looking at other processes")
+    if op == "mach-lookup":
+        if "opendirectoryd" in target:
+            return t("查你的真实用户名", "Looking up your real user name")
+        if "pasteboard" in target:
+            return t("读写剪贴板", "Using the clipboard")
+        return t("连接系统服务", "Connecting to system services")
+    if target.startswith(("/Applications/", "/System/Applications/", h + "Applications/")):
+        return t("打听你装了哪些软件", "Checking which apps you have")
+    if target.startswith(tuple(h + d for d in ("Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music", "Library/Mobile Documents"))):
+        return t("你的个人文件", "Your personal files")
+    if target.startswith(h + "Library/"):
+        return t("其他软件的数据和系统设置", "Other apps' data and settings")
+    if target.startswith(h + "."):
+        return t("家目录里的隐藏配置（如 .ssh、.cache）", "Hidden settings in your home folder (like .ssh, .cache)")
+    if target.startswith("/Volumes/"):
+        return t("外接硬盘和其他磁盘", "External and other disks")
+    if target.startswith(("/private/tmp", "/Users/Shared")):
+        return t("共享的临时文件夹", "Shared temporary folders")
+    if target.startswith(h) or target == HOME:
+        return t("家目录里的其他东西", "Other things in your home folder")
+    return t("其他", "Other")
+
+
+def blocked(app):
+    """从系统日志里取出结界拦下的请求，并入这个软件的长期记录。"""
     app = str(Path(app).resolve())
+    bundle_id, _ = info(app)
+    start_file = STATE / f"{bundle_id}.started"
+    history_file = STATE / f"{bundle_id}-blocked.json"
+    history = json.loads(history_file.read_text()) if history_file.exists() else {}
+    if start_file.exists():
+        exes = {plistlib.load(open(p, "rb")).get("CFBundleExecutable") for p in Path(app, "Contents").rglob("Info.plist")
+                if p.parent.name == "Contents"}
+        r = subprocess.run(["/usr/bin/log", "show", "--start", start_file.read_text().strip(), "--style", "compact",
+                            "--predicate", 'senderImagePath CONTAINS "Sandbox" AND eventMessage CONTAINS " deny("'],
+                           capture_output=True, text=True, errors="replace")
+        for line in r.stdout.splitlines():
+            m = re.search(r"Sandbox: (.+?)\(\d+\) deny\(\d+\) (\S+) (.*)$", line)
+            if not m or m[1] not in exes:
+                continue
+            target = m[3].strip()
+            if m[2].startswith("process-info"):
+                target = re.sub(r"\(\d+\)", "", re.sub(r"^others \[|\]$", "", target))
+            key = f"{m[2]} {target}"
+            e = history.setdefault(key, {"first": line[:19], "count": 0})
+            e["last"], e["count"] = line[:19], e["count"] + 1
+        history_file.write_text(json.dumps(history, ensure_ascii=False, indent=1))
+        start_file.write_text(subprocess.run(["date", "+%Y-%m-%d %H:%M:%S"], capture_output=True, text=True).stdout.strip())
+    groups = {}
+    for key, e in history.items():
+        op, target = key.split(" ", 1)
+        groups.setdefault(categorize(op, target, app), []).append((f"{verb(op)}  {target}", e))
+    lines = [t(f"{Path(app).stem} 被结界拦下的请求（同一请求系统日志只记一部分，次数偏少）", f"Requests Kekkai blocked for {Path(app).stem} (the system log keeps only some repeats, so counts run low)"), ""]
+    for cat, items in sorted(groups.items(), key=lambda g: -sum(e["count"] for _, e in g[1])):
+        normal = cat in NORMAL
+        lines.append(f"## {cat}（{len(items)}）" + ("　多数软件都会这样，不算流氓" if normal else "") if isChinese()
+                     else f"## {cat} ({len(items)})" + ("  Most apps do this; it's normal" if normal else ""))
+        for target, e in sorted(items, key=lambda x: -x[1]["count"])[:40]:
+            lines.append(f"  {e['count']:>4}×  {target.replace(HOME, '~')}   {e['last']}")
+        lines.append("")
+    if not history:
+        lines.append(t("还没有记录。在结界中打开它用一会儿再来看。", "Nothing yet. Open it in Kekkai, use it for a while, then check again."))
+    out = STATE / f"{bundle_id}-blocked.txt"
+    out.write_text("\n".join(lines) + "\n")
+    print(out)
+
+
+def isChinese():
+    return os.environ.get("KEKKAI_LANG", "zh") == "zh"
+
+
+def run(app, learn=False):
+    app = original = str(Path(app).resolve())
     bundle_id, exe = info(app)
     sandboxed = bool(entitlements(app).get("com.apple.security.app-sandbox"))
     rule, conf = load_rule(bundle_id), settings().get(bundle_id, {})
@@ -381,6 +490,10 @@ def run(app, learn=False):
         return t(f"{Path(app).stem} 已在运行。请先完全退出，再放进结界。", f"{Path(app).stem} is already running. Quit it completely first.")
     mode = effective_mode(bundle_id, conf, rule)
     STATE.mkdir(parents=True, exist_ok=True)
+    started = STATE / f"{bundle_id}.started"
+    if started.exists():
+        blocked(original)  # 先把上一次的拦截存进长期记录
+    started.write_text(subprocess.run(["date", "+%Y-%m-%d %H:%M:%S"], capture_output=True, text=True).stdout.strip())
     env = {"TZ": conf["tz"]} if conf.get("tz") else {}
     cwd = "/"
     sb = STATE / f"{bundle_id}.sb"
@@ -489,6 +602,8 @@ def main():
         return set_block(a[1], a[2], a[3] == "on")
     if a[:1] == ["never"] and (a[1:] == ["list"] or (len(a) == 3 and a[1] in ("add", "rm"))):
         return never_cmd(*a[1:])
+    if len(a) == 2 and a[0] == "blocked":
+        return blocked(a[1])
     if len(a) != 2 or a[0] not in ("run", "learn", "report", "stop", "reset"):
         sys.exit(__doc__)
     if a[0] == "stop":

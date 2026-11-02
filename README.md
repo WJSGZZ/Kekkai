@@ -28,13 +28,15 @@ Open `~/Applications/Kekkai.app`, pick an app from the list (or drag one onto th
 
 Quit the app completely before opening it from Kekkai. Copies launched## Features
 
-- **Only its own data.** The app reads and writes its own folders in `~/Library`, found by bundle ID and app name. Everything else gets "no such file", not "permission denied". That includes Downloads, Desktop, Documents, external drives and other apps' data.
+- **Only its own data.** The app reads and writes its own folders in `~/Library`. Everything else gets "no such file", not "permission denied". That includes Downloads, Desktop, Documents, external drives and other apps' data. Its folders are found three ways: the bundle IDs of the app and its bundled helpers and extensions (`com.tencent.qq` and `com.tencent.qq.share` count, `com.tencent.qqmusic` doesn't), the group containers it declares, and folders in the usual data locations named exactly after the app (such as 微信开发者工具).
+- **No peeking at your other apps.** `/Applications` can't be listed, asking macOS where an app is installed returns nothing, Spotlight returns none of your files, and other processes are hidden.
 - **Folders on request.** If the app needs somewhere to save downloads, allow a folder for it on the detail page. You can remove it any time.
 - **Always-blocked folders.** These override every allowed folder, apply in Learn Mode too, and can't be reached through symlinks. The defaults are `~/.ssh`, `~/.gnupg` and `~/.aws`.
 - **Hidden user name.** The app sees the user name `user`.
 - **Clipboard blocking.** Cut an app off from the clipboard entirely, including drag and drop. Camera, microphone and location are left to macOS, which already controls them per app; the detail page links to the right System Settings pages.
 - **Per-app time zone.** Each app can show its own time zone.
 - **Virtual location.** Search for a place or click the map, and that's the location the app gets whenever it asks macOS. There's no permission prompt, and the real location never reaches the app. In mainland China, the map's GCJ-02 coordinates are converted to the GPS (WGS-84) coordinates apps expect. The app runs as a copy while this is on. Apps that work out your location from your IP address need a proxy instead.
+- **Block Log.** Every launch adds what the app tried to reach and was refused, grouped into categories such as "Checking which apps you have" and "Your personal files".
 - **Learn Mode.** Run an app once without isolation to log which outside paths it touches. Useful when writing rules for unusual apps.
 
 The interface follows your system language (English or Chinese).
@@ -46,7 +48,7 @@ Tested on macOS 27.2:
 | App | Result |
 |---|---|
 | Baidu Netdisk | Starts on its existing data, stays signed in and fetches its file list. Downloads, Desktop and Documents are hidden, and an allowed folder can be read and written |
-| Tencent Meeting | Starts on its existing data. At launch it probes for Chrome and ChatGPT, and both are blocked |
+| Tencent Meeting | Starts on its existing data. Its Block Log shows that at launch it checks for Chrome, ChatGPT and a test copy of Chrome in `~/.cache`, all blocked |
 | WeChat DevTools | Starts on its existing data |
 | QQ, WeChat | The unsandboxed copy reaches the QR sign-in screen. Running the copy on the existing data hasn't been tested yet |
 
@@ -86,7 +88,9 @@ The command line also keeps a disposable private space (`set-mode <bundle id> sp
 - Kekkai can't hide itself completely. An app can tell it's sandboxed, and the user ID is real.
 - Only the time zone changes, not the clock. An app can still work out your location from your IP address or server time.
 - A virtual location only replaces the macOS location API. An app that scans nearby Wi-Fi or uses your IP address may still find your real location.
-- Network access isn't restricted.
+- Network access isn't restricted, including probing ports on your own Mac (Baidu Netdisk logs that it "detected a local server").
+- The list of running apps can't be hidden. It comes from macOS LaunchServices, and blocking that stops apps from launching at all (tested).
+- The Block Log only covers refused requests, and the system log keeps only some repeats of the same request. What an app does inside its own data, and its network traffic, aren't logged.
 - The keychain works as normal. The `block_keychain` rule blocks it, but sign-ins that rely on the keychain may then fail.
 - Always-blocked folders are matched by path, so a hard link that already exists can still be read.
 - System extensions, such as a cloud drive's sync extension, aren't restricted.

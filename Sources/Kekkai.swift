@@ -124,6 +124,15 @@ final class Store: ObservableObject {
         }
     }
 
+    func showBlocked(path: String) {
+        DispatchQueue.global().async {
+            let r = CLI.call(["blocked", path])
+            DispatchQueue.main.async {
+                if r.ok { NSWorkspace.shared.open(URL(fileURLWithPath: r.out)) } else { self.message = r.out }
+            }
+        }
+    }
+
     func showReport(path: String) {
         DispatchQueue.global().async {
             let r = CLI.call(["report", path])
@@ -264,13 +273,17 @@ struct Detail: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Section(t("更多", "More")) {
+                Section {
                     HStack {
+                        Button(t("拦截记录", "Block Log")) { store.showBlocked(path: app.path) }
                         Button(t("学习模式（不隔离）", "Learn Mode (No Isolation)")) { store.perform(["learn", app.path]) }
                             .disabled(app.running || app.inside)
-                        Button(t("访问记录", "Access Log")) { store.showReport(path: app.path) }
+                        Button(t("学习记录", "Learn Log")) { store.showReport(path: app.path) }
                         Spacer()
                     }
+                } header: { Text(t("记录", "Logs")) } footer: {
+                    Text(t("拦截记录：它想碰却被挡下的东西，每次打开都会累积。学习模式：不隔离地跑一次，记下它碰过的所有地方。", "Block Log lists what it tried to reach and was refused, collected across launches. Learn Mode runs it once without isolation and records everywhere it went."))
+                        .foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)

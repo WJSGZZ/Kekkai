@@ -5,7 +5,9 @@ src="$(cd "$(dirname "$0")" && pwd)"; dst="$HOME/Library/Application Support/Kek
 mkdir -p "$dst"; cp "$src/kekkai" "$dst/kekkai";
 clang -dynamiclib -fobjc-arc -Wno-deprecated-declarations -arch arm64 -arch x86_64 -framework Foundation -framework CoreLocation "$src/Sources/fakeloc.m" -o "$dst/libfakeloc.dylib"
 clang -dynamiclib -arch arm64 -arch x86_64 -framework CoreFoundation -framework IOKit -framework SystemConfiguration "$src/Sources/inject.c" -o "$dst/libkekkai.dylib"; rm -f "$dst/libkekkaiuser.dylib"; rm -rf "$dst/rules"; cp -R "$src/rules" "$dst/rules"
-app="$HOME/Applications/Kekkai.app"; rm -rf "$app"; mkdir -p "$app/Contents/MacOS"
+# 管理员能直接写系统的“应用程序”；不能写才放个人的 ~/Applications
+if [ -w /Applications ]; then app="/Applications/Kekkai.app"; rm -rf "$HOME/Applications/Kekkai.app"; else app="$HOME/Applications/Kekkai.app"; fi
+rm -rf "$app"; mkdir -p "$app/Contents/MacOS"
 swiftc -O -parse-as-library -o "$app/Contents/MacOS/Kekkai" "$src/Sources/Kekkai.swift"
 cp "$src/Info.plist" "$app/Contents/Info.plist"
 mkdir -p "$app/Contents/Resources"; cp "$src/Assets/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"

@@ -1046,7 +1046,9 @@ def make_launcher(app, name=None):
     app = str(Path(app).resolve())
     bundle_id, _ = info(app)
     name = name or Path(app).stem
-    dst = Path(HOME, "Applications", t(f"{name}（结界）", f"{name} (Kekkai)") + ".app")
+    # 放进系统的“应用程序”，和其他软件在一起；没有写入权限（非管理员）才放个人的 ~/Applications
+    apps = Path("/Applications") if os.access("/Applications", os.W_OK) else Path(HOME, "Applications")
+    dst = apps / (t(f"{name}（结界）", f"{name} (Kekkai)") + ".app")
     shutil.rmtree(dst, ignore_errors=True)
     (dst / "Contents/MacOS").mkdir(parents=True)
     exe = dst / "Contents/MacOS/launch"

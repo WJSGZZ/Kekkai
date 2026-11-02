@@ -24,7 +24,7 @@ cd Kekkai
 ./install.sh
 ```
 
-Open `~/Applications/Kekkai.app`, pick an app from the list (or drag one onto the window), and click **Open in Kekkai**.
+Open `Kekkai.app` in Applications, pick an app from the list (or drag one onto the window), and click **Open in Kekkai**.
 
 Quit the app completely before opening it from Kekkai. Copies launched from their own icon or from a web link aren't restricted.
 

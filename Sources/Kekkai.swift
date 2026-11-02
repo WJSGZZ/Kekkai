@@ -132,6 +132,17 @@ final class Store: ObservableObject {
         }
     }
 
+    func makeLauncher(_ app: AppEntry) {
+        DispatchQueue.global().async {
+            let r = CLI.call(["launcher", app.path, displayName(app)])
+            DispatchQueue.main.async {
+                guard r.ok else { self.message = r.out; return }
+                NSWorkspace.shared.setIcon(NSWorkspace.shared.icon(forFile: app.path), forFile: r.out, options: [])
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: r.out)])
+            }
+        }
+    }
+
     func loadNever(_ args: [String] = ["never", "list"]) {
         DispatchQueue.global().async {
             let r = CLI.call(args)
@@ -163,6 +174,7 @@ struct Detail: View {
     @ObservedObject var store: Store
     let now: Date
     @State private var picking = false
+    @State private var importing = false
 
     var status: (String, Color) {
         if app.inside { return (t("在结界中运行", "Running in Kekkai"), .green) }
@@ -195,7 +207,10 @@ struct Detail: View {
             if app.inside {
                 Button(t("停止", "Stop")) { store.perform(["stop", app.path]) }.controlSize(.large)
             } else {
-                Button(t("在结界中打开", "Open in Kekkai")) { store.open(path: app.path) }
+                Menu {
+                    Button(t("在“应用程序”中创建结界入口", "Add a Kekkai Launcher to Applications")) { store.makeLauncher(app) }
+                } label: { Text(t("在结界中打开", "Open in Kekkai")) } primaryAction: { store.open(path: app.path) }
+                    .menuStyle(.button).fixedSize()
                     .buttonStyle(.borderedProminent).controlSize(.large)
                     .keyboardShortcut(.defaultAction).disabled(app.running)
             }
@@ -230,10 +245,23 @@ struct Detail: View {
                         }
                     }
                 } header: { Text(t("允许访问的文件夹", "Allowed folders")) } footer: {
-                    Text(app.sandboxed
-                         ? t("以独立副本运行，数据与原 App 分开，需单独登录。", "Runs as a separate copy with its own data. Sign in separately.")
-                         : t("其他文件一律不可见。", "Everything else stays hidden."))
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(app.sandboxed
+                             ? t("其他文件一律不可见。此 App 自带苹果沙盒，无法直接放入结界，改用副本运行：设置和数据与原 App 分开，原 App 不受影响。",
+                                 "Everything else stays hidden. This app uses Apple's sandbox and can't run inside Kekkai directly, so a copy runs instead, with its own settings and data. The original app is untouched.")
+                             : t("其他文件一律不可见。", "Everything else stays hidden."))
+                        if app.sandboxed {
+                            HStack(spacing: 14) {
+                                Button(t("从原 App 导入数据…", "Import Data from Original…")) { importing = true }
+                                if app.hasSpace {
+                                    Button(t("在访达中显示副本的数据", "Show the Copy's Data in Finder")) {
+                                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: app.space)
+                                    }
+                                }
+                            }.buttonStyle(.link)
+                        }
+                    }
+                    .foregroundStyle(.secondary)
                 }
 
                 BlockLogSection(app: app, store: store)
@@ -270,14 +298,22 @@ struct Detail: View {
                         Button(t("摄像头", "Camera")) { openPrivacy("Privacy_Camera") }
                         Button(t("麦克风", "Microphone")) { openPrivacy("Privacy_Microphone") }
                         Button(t("定位", "Location")) { openPrivacy("Privacy_LocationServices") }
+                        Button(t("本地网络", "Local Network")) { openPrivacy("Privacy_LocalNetwork") }
                     }
                 } header: { Text(t("系统权限", "System permissions")) } footer: {
-                    Text(t("由 macOS 按 App 管理。", "Managed by macOS for each app."))
+                    Text(t("由 macOS 按 App 管理。访问局域网设备的权限在“隐私与安全性 › 本地网络”里关闭；本机上其他程序的端口由结界拦截。",
+                           "Managed by macOS for each app. Turn off access to devices on your network under Privacy & Security › Local Network; Kekkai blocks ports opened by other programs on this Mac."))
                         .foregroundStyle(.secondary)
                 }
 
             }
             .formStyle(.grouped)
+            .confirmationDialog(t("用原 App 的数据替换副本的数据？", "Replace the copy's data with the original app's data?"), isPresented: $importing) {
+                Button(t("导入", "Import"), role: .destructive) { store.perform(["import", app.path]) }
+            } message: {
+                Text(t("副本会先停止。原 App 的数据不动；副本现有的数据会被替换。登录凭据由苹果按签名保管，导入后通常仍需点一次登录。",
+                       "The copy stops first. The original app's data is untouched; the copy's current data is replaced. Sign-in credentials are tied to the app's signature, so you'll usually need to sign in once more."))
+            }
             .sheet(isPresented: $picking) {
                 LocationPicker(current: app.location) { place in
                     store.update(app.id) { $0.location = place }
@@ -332,8 +368,8 @@ struct BlockLogSection: View {
                 HStack(spacing: 6) {
                     Text(item.category).foregroundStyle(.secondary)
                     if item.count > 1 { Text("×\(item.count)").foregroundStyle(.secondary) }
-                    if item.suspicious { Text(t("可疑", "Suspicious")).fontWeight(.semibold).foregroundStyle(.red) }
-                    if item.recent { Text(t("本次", "This launch")).foregroundStyle(.blue) }
+                    if item.suspicious { Text(t("越权", "Overreach")).fontWeight(.semibold).foregroundStyle(.red) }
+                    if item.recent { Text(t("本次运行", "This run")).foregroundStyle(.blue) }
                 }.font(.caption)
             }
             Spacer()
@@ -350,7 +386,7 @@ struct BlockLogSection: View {
     }
     /// 等你决定的：可能真需要的（你的文件夹、闪退前被挡的数据），打听类的折进分组
     var pending: [LogItem] { order((log?.items ?? []).filter { $0.ask == true && $0.decision == nil }) }
-    /// 其余按类别折叠：可疑的在前，系统常规的在最后
+    /// 其余按类别折叠：越权的在前，系统常规的在最后
     var groups: [(String, [LogItem])] {
         let rest = (log?.items ?? []).filter { !pending.map(\.key).contains($0.key) }
         return Dictionary(grouping: rest, by: \.category).map { ($0.key, order($0.value)) }.sorted {
@@ -402,9 +438,9 @@ struct BlockLogSection: View {
                         HStack(spacing: 6) {
                             Text(cat)
                             Text("\(items.count)").foregroundStyle(.secondary)
-                            if items[0].suspicious { Text(t("可疑", "Suspicious")).font(.caption.weight(.semibold)).foregroundStyle(.red) }
-                            if items[0].normal { Text(t("多数软件都会", "Most apps do this")).font(.caption).foregroundStyle(.secondary) }
-                            if items.contains(where: \.recent) { Text(t("本次", "This launch")).font(.caption).foregroundStyle(.blue) }
+                            if items[0].suspicious { Text(t("越权", "Overreach")).font(.caption.weight(.semibold)).foregroundStyle(.red) }
+                            if items[0].normal { Text(t("常规", "Routine")).font(.caption).foregroundStyle(.secondary) }
+                            if items.contains(where: \.recent) { Text(t("本次运行", "This run")).font(.caption).foregroundStyle(.blue) }
                         }
                     }
                 }
@@ -412,7 +448,7 @@ struct BlockLogSection: View {
                 ProgressView().controlSize(.small)
             }
         } header: { Text(t("拦截记录", "Block Log")) } footer: {
-            Text(app.inside ? t("运行中，实时更新。上面是它可能需要的，其余一直挡着，展开分组也能放行。", "Running. Updates live. What it may need is listed first; everything else stays blocked, and you can still allow items inside each group.") : t("在结界中打开后，它被拦下的请求会出现在这里。", "Requests it makes that Kekkai blocks show up here once you open it."))
+            Text(app.inside ? t("实时更新。以上请求均已拦截；排在最前的可能是它正常工作所需，可逐条放行。“越权”指超出它本身用途的探查，“常规”指系统框架自动发出的请求。", "Updates live. Everything above is blocked. Items at the top may be needed for the app to work and can be allowed one by one. Overreach means probing beyond what the app is for; Routine means requests the system frameworks make on their own.") : t("以上请求均已拦截。在结界中运行时实时更新。", "Everything above is blocked. Updates live while the app runs in Kekkai."))
                 .foregroundStyle(.secondary)
         }
         .task(id: "\(app.id) \(app.inside)") {

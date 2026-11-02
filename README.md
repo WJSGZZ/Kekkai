@@ -35,6 +35,7 @@ Quit the app completely before opening it from Kekkai. Copies launched from thei
 - **Folders on request.** If the app needs somewhere to save downloads, allow a folder for it on the detail page. You can remove it any time.
 - **Always-blocked folders.** These override every allowed folder, apply in Learn Mode too, and can't be reached through symlinks. The defaults are `~/.ssh`, `~/.gnupg` and `~/.aws`.
 - **Hidden user name.** The app sees the user name `user`.
+- **No touching other programs' ports.** Proxy dashboards, dev servers and local interfaces opened by other apps are out of reach, except the system proxy's port. In testing, Baidu Netdisk probed every 32nd port from 7475 at launch and QQ tried 9210–9219; all were blocked and both kept working. Connections to temporary ports above 49152 usually come from the app's own parts, so they're listed first in the Block Log for you to decide. Apps whose job is local development, such as WeChat DevTools, get `"allow_localhost": true` in their rule. Kekkai can't block devices on your network: the macOS sandbox only accepts "any address" or "this Mac" (a subnet is rejected, tested). Turn that off under Privacy & Security › Local Network.
 - **Clipboard blocking.** Cut an app off from the clipboard entirely, including drag and drop. Camera, microphone and location are left to macOS, which already controls them per app; the detail page links to the right System Settings pages.
 - **Per-app time zone.** Each app can show its own time zone.
 - **Virtual location.** Search for a place or click the map, and that's the location the app gets whenever it asks macOS. There's no permission prompt, and the real location never reaches the app. In mainland China, the map's GCJ-02 coordinates are converted to the GPS (WGS-84) coordinates apps expect. The app runs as a copy while this is on. Apps that work out your location from your IP address need a proxy instead.
@@ -59,12 +60,12 @@ With the clipboard blocked, the app can't reach the clipboard service at all. Th
 
 ## Apps with Apple's App Sandbox (QQ, WeChat)
 
-Wrapped directly, these apps crash at launch inside macOS's own sandbox setup, however loose the Kekkai rules are. This happened with both QQ and WeChat. Instead, Kekkai makes an APFS clone of the app at `/Users/Shared/Kekkai/<bundle id>/Applications`, removes Apple's sandbox and any entitlements that need a developer certificate, re-signs the copy locally, and runs that copy inside Kekkai. The copy can't use the original data. macOS's System Policy lets only the app with the original signature into its sandbox container (`~/Library/Containers/<bundle id>`), and the re-signed copy is refused outright (tested: EPERM, logged as System Policy, not Kekkai). So the copy keeps its data in `/Users/Shared/Kekkai/<bundle id>`. You sign in once, and it stays.
+Wrapped directly, these apps crash at launch inside macOS's own sandbox setup, however loose the Kekkai rules are. This happened with both QQ and WeChat. Instead, Kekkai makes an APFS clone of the app at `/Users/Shared/Kekkai/<bundle id>/Applications`, removes Apple's sandbox and any entitlements that need a developer certificate, re-signs the copy locally, and runs that copy inside Kekkai. The copy can't use the original data. macOS's System Policy lets only the app with the original signature into its sandbox container (`~/Library/Containers/<bundle id>`), and the re-signed copy is refused outright (tested: EPERM, logged as System Policy, not Kekkai). So the copy keeps its data in `/Users/Shared/Kekkai/<bundle id>`. Apple's sandbox keeps all of such an app's data in its container, so it's clear what to bring along: when the copy is first created, Kekkai clones the container's data into it with APFS, leaving the original untouched. In testing, QQ recognized the account after the import but still stopped at its one-click sign-in screen, because sign-in credentials are held by Apple per signature and the copy can't read them. You can also choose Import Data from Original on the detail page at any time to replace the copy's data.
 
 - The original app isn't touched, and opening it from its own icon works as before. When the original updates, the copy is rebuilt on the next launch.
 - The clone takes almost no space. Only the re-signed files use extra disk.
 - The copy is signed differently, so you'll grant camera and microphone access again.
-- The original and the copy each keep their own chat history. The copy only has what syncs from the cloud after you sign in.
+- After an import, the two don't sync. Opening the original directly uses the original's data, outside Kekkai. To always go through Kekkai, use the arrow next to Open in Kekkai to add a launcher such as "QQ (Kekkai)" to Applications, then keep it in the Dock or open it from Spotlight.
 - Without Apple's sandbox, the copy is limited only by Kekkai's rules.
 
 ## Compared with Apple's App Sandbox
@@ -104,10 +105,10 @@ The command line also keeps a disposable private space (`set-mode <bundle id> sp
 - Kekkai can't hide itself completely. An app can tell it's sandboxed, and the user ID is real.
 - Only the time zone changes, not the clock. An app can still work out your location from your IP address or server time.
 - A virtual location only replaces the macOS location API. An app that scans nearby Wi-Fi or uses your IP address may still find your real location.
-- Network access isn't restricted, including probing ports on your own Mac (Baidu Netdisk logs that it "detected a local server").
+- Internet access isn't restricted, and devices on your network are left to macOS's Local Network permission.
 - The list of running apps can't be hidden. It comes from macOS LaunchServices, and blocking that stops apps from launching at all (tested).
 - The Block Log only covers refused requests, and the system log keeps only some repeats of the same request. What an app does inside its own data, and its network traffic, aren't logged.
-- The keychain works as normal. The `block_keychain` rule blocks it, but sign-ins that rely on the keychain may then fail.
+- The keychain works as normal, and the keychain file itself is allowed, or macOS reports that the keychain is missing. Reading passwords from it still goes through macOS's own approval. The `block_keychain` rule blocks it, but sign-ins that rely on the keychain may then fail.
 - Always-blocked folders are matched by path, so a hard link that already exists can still be read.
 - System extensions, such as a cloud drive's sync extension, aren't restricted.
 - macOS Gatekeeper still refuses downloaded apps that aren't notarized by Apple, and Kekkai doesn't get around it. The detail page explains why; whether to click Open Anyway in Privacy & Security is up to you.

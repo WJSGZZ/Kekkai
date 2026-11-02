@@ -57,6 +57,7 @@ struct AppEntry: Codable, Identifiable, Equatable {
     var mode: String
     var allow: [String]
     var allowOpen: Bool
+    var options: [String: Bool]? = nil
     var reviewed: Bool
     let space: String
 }
@@ -193,6 +194,12 @@ struct Detail: View {
         store.perform(args)
     }
 
+    func option(_ key: String, _ title: String) -> some View {
+        Toggle(title, isOn: Binding(
+            get: { app.options?[key] ?? false },
+            set: { v in set(["set", app.id, key, v ? "on" : "off"]) { $0.options?[key] = v } }))
+    }
+
     var header: some View {
         HStack(spacing: 16) {
             Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().frame(width: 64, height: 64)
@@ -270,6 +277,10 @@ struct Detail: View {
                     Toggle(t("允许打开其他 App 和链接", "Allow opening other apps and links"), isOn: Binding(
                         get: { app.allowOpen },
                         set: { v in set(["set-open", app.id, v ? "on" : "off"]) { $0.allowOpen = v } }))
+                    option("localhost", t("允许连接本机其他程序的端口", "Allow connecting to other programs' ports on this Mac"))
+                    option("procinfo", t("允许获取其他程序的运行信息", "Allow inspecting other running programs"))
+                    option("username", t("显示你的真实用户名", "Show your real user name"))
+                    option("keychain", t("禁止使用钥匙串", "Block the keychain"))
                     Toggle(t("禁止剪贴板和拖放", "Block clipboard and drag and drop"), isOn: Binding(
                         get: { app.block.contains("clipboard") },
                         set: { v in set(["set-block", app.id, "clipboard", v ? "on" : "off"]) { e in
@@ -289,7 +300,7 @@ struct Detail: View {
                         }
                     }
                 } header: { Text(t("隔离", "Isolation")) } footer: {
-                    Text(t("结界内时间 \(clock(app.tz))。打开其他 App 可能绕过结界。下次打开生效。", "Time inside: \(clock(app.tz)). Opening other apps can bypass Kekkai. Changes apply next launch."))
+                    Text(t("默认全部关闭，最严。打开其他 App 可能绕过结界；禁用钥匙串后，依赖它的登录可能失效。结界内时间 \(clock(app.tz))。下次打开生效。", "All off by default, the strictest setting. Opening other apps can bypass Kekkai, and blocking the keychain may break sign-ins that rely on it. Time inside: \(clock(app.tz)). Changes apply next launch."))
                         .foregroundStyle(.secondary)
                 }
 
@@ -329,6 +340,7 @@ struct LogItem: Codable, Identifiable {
     let key, op, target, verb, category, last, grant: String
     let count: Int
     let recent, suspicious, normal: Bool
+    var level: String? = nil
     var ask: Bool? = nil
     var decision: String?
 }
@@ -368,7 +380,6 @@ struct BlockLogSection: View {
                 HStack(spacing: 6) {
                     Text(item.category).foregroundStyle(.secondary)
                     if item.count > 1 { Text("×\(item.count)").foregroundStyle(.secondary) }
-                    if item.suspicious { Text(t("越权", "Overreach")).fontWeight(.semibold).foregroundStyle(.red) }
                     if item.recent { Text(t("本次运行", "This run")).foregroundStyle(.blue) }
                 }.font(.caption)
             }
@@ -386,12 +397,31 @@ struct BlockLogSection: View {
     }
     /// 等你决定的：可能真需要的（你的文件夹、闪退前被挡的数据），打听类的折进分组
     var pending: [LogItem] { order((log?.items ?? []).filter { $0.ask == true && $0.decision == nil }) }
-    /// 其余按类别折叠：越权的在前，系统常规的在最后
-    var groups: [(String, [LogItem])] {
-        let rest = (log?.items ?? []).filter { !pending.map(\.key).contains($0.key) }
-        return Dictionary(grouping: rest, by: \.category).map { ($0.key, order($0.value)) }.sorted {
-            let a = ($0.1[0].normal ? 1 : 0, $0.1[0].suspicious ? 0 : 1, -$0.1.count), b = ($1.1[0].normal ? 1 : 0, $1.1[0].suspicious ? 0 : 1, -$1.1.count)
-            return a < b
+    /// 其余按档次和类别折叠：越权、留意各按类别分组，常规合成一组
+    func groups(_ level: String) -> [(String, [LogItem])] {
+        let rest = (log?.items ?? []).filter { $0.level == level && !pending.map(\.key).contains($0.key) }
+        return Dictionary(grouping: rest, by: \.category).map { ($0.key, order($0.value)) }.sorted { $0.1.count > $1.1.count }
+    }
+    var routine: [LogItem] { order((log?.items ?? []).filter { $0.level == "routine" }) }
+
+    func tag(_ level: String) -> some View {
+        let (text, color): (String, Color) = switch level {
+        case "overreach": (t("越权", "Overreach"), .red)
+        case "note": (t("留意", "Worth a look"), .orange)
+        default: (t("常规", "Routine"), .secondary)
+        }
+        return Text(text).font(.caption.weight(.semibold)).foregroundStyle(color)
+    }
+    func group(_ title: String, _ items: [LogItem], level: String) -> some View {
+        DisclosureGroup {
+            ForEach(items) { row($0) }
+        } label: {
+            HStack(spacing: 6) {
+                Text(title)
+                Text("\(items.count)").foregroundStyle(.secondary)
+                tag(level)
+                if items.contains(where: \.recent) { Text(t("本次运行", "This run")).font(.caption).foregroundStyle(.blue) }
+            }
         }
     }
 
@@ -431,24 +461,14 @@ struct BlockLogSection: View {
                 }
                 if l.items.isEmpty { Text(t("暂无拦截", "Nothing blocked yet")).foregroundStyle(.secondary) }
                 ForEach(pending) { row($0) }
-                ForEach(groups, id: \.0) { cat, items in
-                    DisclosureGroup {
-                        ForEach(items) { row($0) }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text(cat)
-                            Text("\(items.count)").foregroundStyle(.secondary)
-                            if items[0].suspicious { Text(t("越权", "Overreach")).font(.caption.weight(.semibold)).foregroundStyle(.red) }
-                            if items[0].normal { Text(t("常规", "Routine")).font(.caption).foregroundStyle(.secondary) }
-                            if items.contains(where: \.recent) { Text(t("本次运行", "This run")).font(.caption).foregroundStyle(.blue) }
-                        }
-                    }
-                }
+                ForEach(groups("overreach"), id: \.0) { group($0.0, $0.1, level: "overreach") }
+                ForEach(groups("note"), id: \.0) { group($0.0, $0.1, level: "note") }
+                if !routine.isEmpty { group(t("系统框架的常规请求", "Routine requests from system frameworks"), routine, level: "routine") }
             } else {
                 ProgressView().controlSize(.small)
             }
         } header: { Text(t("拦截记录", "Block Log")) } footer: {
-            Text(app.inside ? t("实时更新。以上请求均已拦截；排在最前的可能是它正常工作所需，可逐条放行。“越权”指超出它本身用途的探查，“常规”指系统框架自动发出的请求。", "Updates live. Everything above is blocked. Items at the top may be needed for the app to work and can be allowed one by one. Overreach means probing beyond what the app is for; Routine means requests the system frameworks make on their own.") : t("以上请求均已拦截。在结界中运行时实时更新。", "Everything above is blocked. Updates live while the app runs in Kekkai."))
+            Text(app.inside ? t("实时更新，以上请求均已拦截。最前面几条它可能真的需要，可以逐条放行。越权：超出它本职的探查。留意：可能正常，但你该知道。常规：系统框架自动发出，不影响使用。", "Updates live. Everything above is blocked. The first items may be needed for the app to work and can be allowed one by one. Overreach: probing beyond what the app is for. Worth a look: may be normal, but you should know. Routine: sent by system frameworks on their own, harmless to block.") : t("以上请求均已拦截。在结界中运行时实时更新。", "Everything above is blocked. Updates live while the app runs in Kekkai."))
                 .foregroundStyle(.secondary)
         }
         .task(id: "\(app.id) \(app.inside)") {

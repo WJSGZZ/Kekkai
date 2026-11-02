@@ -11,6 +11,7 @@
   kekkai set-bring-old <bundle id> <on|off>
   kekkai set-block <bundle id> clipboard <on|off>
   kekkai set-open <bundle id> <on|off>
+  kekkai set <bundle id> localhost|procinfo|username|keychain <on|off>
   kekkai allow <bundle id> add|rm <文件夹>
   kekkai decide <bundle id> allow|deny <操作> <对象>
   kekkai set-location <bundle id> <WGS-84 纬度> <经度> [名称] | -
@@ -123,6 +124,14 @@ def set_field(bundle_id, key, value):
     else:
         entry[key] = value
     save_settings(data)
+
+
+# 隔离开关：界面里的名字 → 设置里的键。没设置时用规则文件的默认，再没有就是最严
+OPTIONS = {"localhost": "allow_localhost", "procinfo": "allow_procinfo", "username": "keep_username", "keychain": "block_keychain"}
+
+
+def opt(rule, conf, key):
+    return bool(conf[key]) if key in conf else bool(rule.get(key))
 
 
 def set_tz(bundle_id, tz):
@@ -271,20 +280,21 @@ def set_block(bundle_id, device, on):
 def common_rules(rule, conf):
     L = [";; 不许借系统工具跑到结界外",
          "(deny process-exec", *[f"  (literal {q(x)})" for x in NO_EXEC], ")"]
-    if not rule.get("keep_username"):
+    if not opt(rule, conf, "keep_username"):
         L += [";; 挡住目录服务，软件查不到真实用户名",
               "(deny mach-lookup", *[f"  (global-name {q(x)})" for x in DIRECTORY_SERVICES], ")"]
     if not conf.get("allow_open"):
         # 经系统拉起的软件不在结界里，挡住它就挡住了借别的软件逃出去的路；代价是不能用浏览器打开链接
         L += [";; 不许拉起其他软件、不许给其他软件发自动化指令", "(deny lsopen)", "(deny appleevent-send)"]
     # 运行中的软件列表来自 launchservicesd，挡住它图形软件就启动不了，所以只挡进程信息
-    L += [";; 看不到其他进程", "(deny process-info* (target others))", "(deny process-info-listpids)"]
-    if not (rule.get("allow_localhost") or conf.get("allow_localhost")):
+    if not opt(rule, conf, "allow_procinfo"):
+        L += [";; 看不到其他进程", "(deny process-info* (target others))", "(deny process-info-listpids)"]
+    if not opt(rule, conf, "allow_localhost"):
         # 本机上别的程序开的端口（代理面板、开发服务器、其他软件的本地接口）不让它碰；系统代理的端口留着，不然上不了网。
         # 沙盒规则只能写“任意地址”或“本机”，局域网设备交给 macOS 的“本地网络”权限
         L += [";; 不许连本机上其他程序的网络端口", '(deny network-outbound (remote ip "localhost:*"))',
               *[f'(allow network-outbound (remote ip "localhost:{p}"))' for p in proxy_ports()]]
-    if rule.get("block_keychain"):
+    if opt(rule, conf, "block_keychain"):
         L += [";; 挡住钥匙串，代价是依赖钥匙串的登录会失效",
               '(deny mach-lookup (global-name "com.apple.securityd.xpc") (global-name "com.apple.SecurityServer") (global-name "com.apple.secd.keychain"))']
     for d in blocked_devices(conf):
@@ -358,7 +368,7 @@ def build_profile(app, bundle_id, rule, conf, mode, groups=()):
               *[f"  (subpath {q(p)})" for p in approved], *["  " + s for s in system], ")",
               f"(allow file-read* (literal {q(HOME + '/.CFUserTextEncoding')}))",
               f"(allow file-read-metadata (subpath {q(HOME + '/Library/Keychains')}))"]
-    if not rule.get("block_keychain"):
+    if not opt(rule, conf, "block_keychain"):
         # 钥匙串文件藏起来系统会以为钥匙串丢了（实测弹“找不到钥匙串”）；读里面的密码仍要过系统自己的授权
         L.append(f"(allow file-read* file-write* (subpath {q(HOME + '/Library/Keychains')}))")
     # 输入法和键盘布局，打字要用
@@ -463,50 +473,63 @@ def verb(op):
     return t("读取信息", "Inspect") if op.startswith("process-info") else op
 
 
-# 类别：(中文, 英文)。越权的是它本职以外的打探，常规的是系统框架自己发出的
+# 类别：(中文, 英文, 档次)。常规：系统框架自己发出的；留意：可能是正常需要，值得你知道；越权：超出它本职的探查
 CATS = {
-    "macos": ("被 macOS 拒绝（非结界）", "Refused by macOS (not Kekkai)"),
-    "bundle": ("访问自身应用包", "Its own app bundle"),
-    "sysproc": ("读取系统进程信息", "Reading system process info"),
-    "proc": ("读取其他进程信息", "Reading other processes' info"),
-    "launch": ("启动或控制其他应用", "Launching or controlling other apps"),
-    "account": ("查询用户账户", "Looking up your user account"),
-    "clipboard": ("访问剪贴板", "Accessing the clipboard"),
-    "service": ("连接系统服务", "Connecting to system services"),
-    "localhost": ("探测本机其他程序的端口", "Probing ports of other programs on this Mac"),
-    "ownport": ("连接本机临时端口（多为自身组件）", "Connecting to temporary ports on this Mac (usually its own parts)"),
-    "apps": ("检测已安装的应用", "Detecting installed apps"),
-    "personal": ("访问个人文件", "Accessing your personal files"),
-    "appdata": ("访问其他应用的数据", "Accessing other apps' data"),
-    "hidden": ("访问主目录中的隐藏配置", "Accessing hidden settings in your home folder"),
-    "sysvol": ("读取系统分区", "Reading system volumes"),
-    "disk": ("访问外接磁盘", "Accessing external disks"),
-    "apptemp": ("访问其他应用的临时文件与缓存", "Accessing other apps' temporary files and caches"),
-    "installs": ("检测系统级安装内容", "Detecting system-wide installs"),
-    "sharedtmp": ("访问共享临时文件夹", "Accessing shared temporary folders"),
-    "home": ("访问主目录中的其他项目", "Accessing other items in your home folder"),
-    "other": ("其他", "Other"),
+    "macos": ("被 macOS 拒绝（非结界）", "Refused by macOS (not Kekkai)", "note"),
+    "bundle": ("自身应用包", "Its own app bundle", "routine"),
+    "owndata": ("原版自己的数据", "The original app's own data", "routine"),
+    "sysproc": ("系统进程信息", "System process info", "routine"),
+    "account": ("用户账户信息", "User account info", "routine"),
+    "service": ("系统服务", "System services", "routine"),
+    "sysfiles": ("系统设置、词典与崩溃报告", "System settings, dictionaries and crash reports", "routine"),
+    "temp": ("临时文件", "Temporary files", "routine"),
+    "sysvol": ("系统分区", "System volumes", "routine"),
+    "homeroot": ("主目录本身", "Your home folder itself", "routine"),
+    "personal": ("访问你的文件夹", "Your folders", "note"),
+    "home": ("主目录中的其他项目", "Other items in your home folder", "note"),
+    "disk": ("外接磁盘", "External disks", "note"),
+    "ownport": ("连接自身组件（本机临时端口）", "Its own parts (temporary ports on this Mac)", "note"),
+    "downloads": ("系统下载记录", "System download history", "note"),
+    "clipboard": ("剪贴板（你已禁止）", "Clipboard (blocked by your setting)", "note"),
+    "launch": ("启动或控制其他应用", "Launching or controlling other apps", "note"),
+    "sharedtmp": ("共享临时文件夹", "Shared temporary folders", "note"),
+    "other": ("其他", "Other", "note"),
+    "proc": ("获取其他程序的运行信息", "Inspecting other running programs", "overreach"),
+    "apps": ("扫描已安装的应用", "Scanning installed apps", "overreach"),
+    "installs": ("扫描系统级安装内容", "Scanning system-wide installs", "overreach"),
+    "appdata": ("查看其他应用的数据", "Looking at other apps' data", "overreach"),
+    "apptemp": ("查看其他应用的临时文件", "Looking at other apps' temporary files", "overreach"),
+    "hidden": ("读取主目录中的隐藏文件", "Reading hidden files in your home folder", "overreach"),
+    "localhost": ("探测本机端口", "Probing ports on this Mac", "overreach"),
 }
-NORMAL = {"sysvol", "bundle", "account", "service", "sysproc"}
-SUSPICIOUS = {"apptemp", "installs", "apps", "personal", "appdata", "hidden", "disk", "proc", "launch", "localhost"}
+NORMAL = {k for k, v in CATS.items() if v[2] == "routine"}
+SUSPICIOUS = {k for k, v in CATS.items() if v[2] == "overreach"}
 # 它可能真需要、值得你决定的
 ASKS = {"personal", "home", "other", "disk", "ownport"}
 # 图形软件的系统框架自己会查这些进程【推断，依据是各软件都有这几条】
 SYSTEM_PROCS = {"WindowServer", "initproc", "launchd", "WindowManager", "MenuBarAgent", "Dock", "loginwindow",
                 "ControlCenter", "SystemUIServer", "ScreenTimeSettingsAgent", "NotificationCenter"}
+# 系统框架自己会碰的个人资料库位置【推断，依据是各软件都有：拼写检查、崩溃报告、系统偏好、网络缓存的上层文件夹】
+SYSTEM_LIBRARY = ("Spelling", "Application Support/CrashReporter", "Preferences/com.apple.", "Preferences/.GlobalPreferences",
+                  "Keychains", "Caches/com.apple.", "Keyboard Layouts", "Input Methods")
 
 
 def cat_name(key):
-    return t(*CATS[key])
+    return t(*CATS[key][:2])
 
 
-def categorize(op, target, app=""):
+def categorize(op, target, app="", bundle_id=""):
     """把一条拦截归类，返回 CATS 里的键。"""
     h = HOME + "/"
+    target = re.sub(r"^remote:\*:", "localhost:", target)
     if op.startswith("system:"):
         return "macos"
     if app and (target == app or target.startswith(app + "/")):
         return "bundle"
+    if app and target.startswith(str(SPACES) + "/") and "/Applications/" + Path(app).name in target:
+        return "bundle"  # 它自己的副本
+    if bundle_id and target.startswith(f"{h}Library/Containers/{bundle_id}/"):
+        return "owndata"
     if op.startswith("process-info"):
         return "sysproc" if target in SYSTEM_PROCS else "proc"
     if op in ("lsopen", "appleevent-send"):
@@ -523,21 +546,33 @@ def categorize(op, target, app=""):
         return "apps"
     if target.startswith(tuple(h + d for d in ("Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music", "Library/Mobile Documents"))):
         return "personal"
+    if "QuarantineEvents" in target:
+        return "downloads"
     if target.startswith(h + "Library/"):
+        rel = target[len(h + "Library/"):]
+        # 上层文件夹只查属性，是系统框架在建自己的位置；列出内容或进到别人的文件夹才算越权
+        if rel.startswith(SYSTEM_LIBRARY) or "/" not in rel and not op.startswith("file-read-data"):
+            return "sysfiles"
         return "appdata"
+    if target == HOME:
+        return "homeroot"
     if target.startswith(h + "."):
         return "hidden"
     if target in ("/Volumes/Recovery", "/Volumes/Preboot", "/Volumes/VM", "/Volumes/Data"):
         return "sysvol"
     if target.startswith("/Volumes/"):
         return "disk"
-    if target.startswith((USER_TEMP, USER_CACHE, str(Path(USER_TEMP).parent) + "/")) or target == str(Path(USER_TEMP).parent):
+    if target in (USER_TEMP, USER_CACHE) or target == str(Path(USER_TEMP).parent):
+        return "apptemp"  # 列出共用临时文件夹，看得到所有软件的东西
+    if target.startswith((USER_TEMP + "/TemporaryItems", USER_TEMP + "/scoped_dir")) or bundle_id and target.startswith((USER_TEMP, USER_CACHE)) and bundle_id in target:
+        return "temp"
+    if target.startswith((USER_TEMP, USER_CACHE)):
         return "apptemp"
     if target in NO_LIST or target.startswith(("/Library/", "/opt/", "/usr/local/")):
         return "installs"
     if target.startswith(("/private/tmp", "/Users/Shared")):
         return "sharedtmp"
-    if target.startswith(h) or target == HOME:
+    if target.startswith(h):
         return "home"
     return "other"
 
@@ -619,7 +654,7 @@ def trial(app, wait=40):
         if key in seen:
             continue
         seen.add(key)
-        cat = categorize(op, target, app)
+        cat = categorize(op, target, app, bundle_id)
         items.append({"key": key, "decision": decisions.get(key), "op": op, "target": target, "verb": verb(op), "category": cat_name(cat), "time": when,
                       "count": sum(1 for e in events if e[1] == op and e[2] == target),
                       "suspicious": cat in SUSPICIOUS, "normal": cat in NORMAL, "grant": grant_kind(op, target),
@@ -683,10 +718,10 @@ def blocked(app, quiet=False, as_json=False):
     groups = {}
     for key, e in history.items():
         op, target = key.split(" ", 1)
-        groups.setdefault(categorize(op, target, app), []).append((f"{verb(op)}  {target}", e))
+        groups.setdefault(categorize(op, target, app, bundle_id), []).append((f"{verb(op)}  {target}", e))
     lines = [t(f"{Path(app).stem} 被结界拦下的请求（同一请求系统日志只记一部分，次数偏少）", f"Requests Kekkai blocked for {Path(app).stem} (the system log keeps only some repeats, so counts run low)"), ""]
     for cat, items in sorted(groups.items(), key=lambda g: -sum(e["count"] for _, e in g[1])):
-        tag = t("　常规", "  Routine") if cat in NORMAL else t("　越权", "  Overreach") if cat in SUSPICIOUS else ""
+        tag = t("　常规", "  Routine") if cat in NORMAL else t("　越权", "  Overreach") if cat in SUSPICIOUS else t("　留意", "  Worth a look")
         lines.append(f"## {cat_name(cat)}（{len(items)}）{tag}" if isChinese() else f"## {cat_name(cat)} ({len(items)}){tag}")
         for target, e in sorted(items, key=lambda x: -x[1]["count"])[:40]:
             lines.append(f"  {e['count']:>4}×  {target.replace(HOME, '~')}   {e['last']}")
@@ -723,10 +758,11 @@ def log_status(app, bundle_id, history):
     items = []
     for key, e in history.items():
         op, target = key.split(" ", 1)
-        cat = categorize(op, target, app)
+        cat = categorize(op, target, app, bundle_id)
+        target = re.sub(r"^remote:\*:", "localhost:", target)
         items.append({"key": key, "decision": decisions.get(key), "op": op, "target": target, "verb": verb(op), "category": cat_name(cat),
                       "count": e["count"], "last": e["last"], "recent": bool(run_start) and e["last"] >= run_start,
-                      "suspicious": cat in SUSPICIOUS, "normal": cat in NORMAL, "grant": grant_kind(op, target)})
+                      "suspicious": cat in SUSPICIOUS, "normal": cat in NORMAL, "level": CATS[cat][2], "grant": grant_kind(op, target)})
         r = items[-1]  # 等你决定的：可能真需要的；打听类的不当成需要
         r["ask"] = bool(r["grant"]) and not r["normal"] and (cat in ASKS or crashed and r["recent"] and cat == "appdata")
     # 从网上下载、没经苹果公证的软件，macOS 的门禁在启动时就拦下（实测 OS_REASON_EXEC）；要不要放行是你的决定
@@ -785,7 +821,7 @@ def run(app, learn=False):
             env.update(HOME=space, CFFIXED_USER_HOME=space, TMPDIR=space + "/tmp/", MAC_CHROMIUM_TMPDIR=space + "/tmp/")
             if not rule.get("keep_prefs_service"):
                 env["__CFPREFERENCES_AVOID_DAEMON"] = "1"  # 偏好设置直接读写模拟区域，不经系统服务
-        if not rule.get("keep_username"):
+        if not opt(rule, conf, "keep_username"):
             env.update(USER="user", LOGNAME="user")
     if not learn and not rule.get("shared_tmp") and mode != "space":
         tmp = Path(HOME, "Library/Caches", bundle_id, "kekkai-tmp")  # 在它自己的文件夹里
@@ -870,7 +906,7 @@ def list_apps():
             out.append({"id": bundle_id, "name": app.stem, "path": str(app), "sandboxed": cache[key]["sandboxed"],
                         "perms": [t(PERMISSIONS[k], PERMISSIONS_EN[k]) for k in cache[key]["perm_keys"]], "inside": inside, "running": f"{app}/Contents/MacOS/{exe}" in procs,
                         "tz": c.get("tz"), "mode": effective_mode(bundle_id, c, load_rule(bundle_id)),
-                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c), "location": c.get("location"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "reviewed": bool(c.get("decided")), "space": str(space), "hasSpace": space.exists()})
+                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c), "location": c.get("location"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "options": {k: opt(load_rule(bundle_id), c, v) for k, v in OPTIONS.items()}, "reviewed": bool(c.get("decided")), "space": str(space), "hasSpace": space.exists()})
     STATE.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(cache))
     print(json.dumps(out, ensure_ascii=False))
@@ -890,6 +926,8 @@ def main():
         return set_allow(a[1], a[2], a[3])
     if a[:1] == ["set-location"] and (a[2:] == ["-"] or len(a) >= 4):
         return set_location(a[1], a[2:])
+    if len(a) == 4 and a[0] == "set" and a[2] in OPTIONS and a[3] in ("on", "off"):
+        return set_field(a[1], OPTIONS[a[2]], a[3] == "on")
     if len(a) == 3 and a[0] == "set-open" and a[2] in ("on", "off"):
         return set_field(a[1], "allow_open", True if a[2] == "on" else "-")
     if len(a) == 4 and a[0] == "set-block" and a[2] in DEVICES and a[3] in ("on", "off"):

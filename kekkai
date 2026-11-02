@@ -33,6 +33,7 @@ NO_LIST = ["/Library/Application Support", "/Library/Preferences", "/Library/Lau
 ROOT = Path(__file__).resolve().parent
 STATE = Path(HOME, "Library/Application Support/Kekkai")
 SPACES = Path("/Users/Shared/Kekkai")
+LIBDIR = SPACES / ".lib"  # 注入库放这里：路径里没有你的用户名，软件看得到它的环境变量
 OWN_BASES = ["Application Support", "Caches", "Preferences", "Logs", "HTTPStorages", "WebKit", "Cookies",
              "Saved Application State", "Containers", "Group Containers", "Application Scripts"]
 BLOCKED = [HOME, "/Users/Shared", "/Applications", "/Volumes", "/private/tmp"]
@@ -105,6 +106,18 @@ def entitlements(app):
         return plistlib.loads(r.stdout) if r.stdout else {}
     except Exception:
         return {}
+
+
+def injectable(app):
+    """签名允许注入才注入：强化运行时要同时许可环境变量和外来库，否则系统会拒绝启动或忽略。"""
+    out = subprocess.run(["codesign", "-dv", app], capture_output=True, text=True).stderr
+    m = re.search(r"flags=0x([0-9a-f]+)", out)
+    flags = int(m.group(1), 16) if m else 0
+    ents = entitlements(app)
+    no_validation = ents.get("com.apple.security.cs.disable-library-validation")
+    if flags & 0x10000:  # 强化运行时
+        return bool(ents.get("com.apple.security.cs.allow-dyld-environment-variables") and no_validation)
+    return not (flags & 0x2000) or bool(no_validation)  # 0x2000：只许加载同一开发者签的库
 
 
 def settings():
@@ -388,7 +401,7 @@ def build_profile(app, bundle_id, rule, conf, mode, groups=()):
     L += ["(deny file-read-data (with errno 2)", *[f"  (literal {q(p)})" for p in NO_LIST], ")"]
     system = [f"(subpath {q(x)})" for x in rule.get("system_paths", [])]
     system += [f'(regex #"{x.replace("^~", "^" + re.escape(HOME))}")' for x in rule.get("system_regex", [])]
-    L.append(f"(allow file-read* (subpath {q(app)}) (literal {q(str(Path(app).parent / 'libfakeloc.dylib'))}))")
+    L.append(f"(allow file-read* (subpath {q(app)}) (subpath {q(str(LIBDIR))}))")
     # /usr/bin/git、clang 等只是转到 Xcode 命令行工具的壳，挡住开发工具目录它们就全失效
     dev = subprocess.run(["/usr/bin/xcode-select", "-p"], capture_output=True, text=True).stdout.strip()
     if dev:
@@ -898,14 +911,19 @@ def run(app, learn=False):
         tmp = Path(HOME, "Library/Caches", bundle_id, "kekkai-tmp")  # 在它自己的文件夹里
         tmp.mkdir(parents=True, exist_ok=True)
         env["TMPDIR"] = env["MAC_CHROMIUM_TMPDIR"] = str(tmp) + "/"  # Chromium 内核不认 TMPDIR
+    libs = []
+    if not learn and mode == "space" and not opt(rule, conf, "keep_username") and injectable(app):
+        libs.append("libkekkaiuser.dylib")  # 问用户名时答 user，不必放开系统查询
+        env["KEKKAI_HOME"] = env["HOME"]
     if fake:
-        lib = Path(app).parent / "libfakeloc.dylib"  # 放在副本旁边，规则已放行
-        lib.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(ROOT / "libfakeloc.dylib", lib)
+        libs.append("libfakeloc.dylib")
         env.update(KEKKAI_LAT=str(fake["lat"]), KEKKAI_LON=str(fake["lon"]))
+    LIBDIR.mkdir(parents=True, exist_ok=True)
+    for name in libs:
+        shutil.copy(ROOT / name, LIBDIR / name)
     args = ["/usr/bin/sandbox-exec", "-f", str(sb), binary]
-    if fake:  # 系统程序会丢掉 DYLD_ 变量，经 env 在最后一步交给软件
-        args[3:3] = ["/usr/bin/env", f"DYLD_INSERT_LIBRARIES={lib}"]
+    if libs:  # 系统程序会丢掉 DYLD_ 变量，经 env 在最后一步交给软件
+        args[3:3] = ["/usr/bin/env", "DYLD_INSERT_LIBRARIES=" + ":".join(str(LIBDIR / n) for n in libs)]
     if any(Path(app, "Contents/Frameworks").glob("* Helper (GPU).app")):
         args.append("--no-sandbox")  # Electron／Chromium 自带沙盒不能嵌套
     args += rule.get("args", [])

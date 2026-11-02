@@ -900,7 +900,7 @@ def run(app, learn=False):
         app = local_copy(app, bundle_id)
     binary = f"{app}/Contents/MacOS/{exe}"
     if subprocess.run(["pgrep", "-f", "^" + re.escape(binary)], capture_output=True).returncode == 0:
-        return t(f"{Path(app).stem} 已在运行。请先完全退出，再放进结界。", f"{Path(app).stem} is already running. Quit it completely first.")
+        return t(f"{Path(app).stem} 正在运行，请先退出。", f"{Path(app).stem} is already running. Quit it completely first.")
     # 苹果的“系统策略”只许原签名的软件进它的容器，重签的副本进不去，只能用自己的一份数据（实测 EPERM）
     mode = "space" if sandboxed else effective_mode(bundle_id, conf, rule)
     STATE.mkdir(parents=True, exist_ok=True)
@@ -1074,16 +1074,16 @@ def add(app, wait=20):
     if job_state(bundle_id)[0]:
         return result(True)
     if (STATE / f"{bundle_id}.stopped").exists():
-        return result(False, t("试运行中途被停止，没有添加。", "The trial run was stopped, so it wasn't added."))
+        return result(False, t("试运行已停止，未添加。", "The trial run was stopped, so it wasn't added."))
     s = log_status(app, bundle_id, {})
     if s["receipt"]:
-        return result(False, t("它是 App Store 版，会检查购买凭证，结界里的副本过不了这一关。",
+        return result(False, t("该软件为 App Store 版本，启动时校验购买凭证，结界副本无法通过校验。",
                                "It's an App Store app that checks its purchase receipt, which the Kekkai copy can't pass."))
     if s["gatekeeper"]:
-        return result(False, t("macOS 拦下了这个未经苹果公证的软件。先在结界外打开一次，在“隐私与安全性”里允许它，再来添加。",
+        return result(False, t("macOS 已阻止该软件运行（未经 Apple 公证）。请先在结界外打开一次，并在“隐私与安全性”中允许后重试。",
                                "macOS blocked this unnotarized app. Open it once outside Kekkai, allow it in Privacy & Security, then add it again."))
     detail = "\n".join(s["errors"][:2])
-    return result(False, t(f"它在结界里启动后自己退出了（退出码 {s['exitCode']}），打开全部权限也一样。", f"It quit on its own after starting in Kekkai (exit code {s['exitCode']}), even with every permission on.")
+    return result(False, t(f"软件在结界中启动后退出（退出码 {s['exitCode']}），开启全部权限后仍无法运行。", f"It quit on its own after starting in Kekkai (exit code {s['exitCode']}), even with every permission on.")
                   + ("\n" + detail if detail else ""))
 
 

@@ -5,9 +5,6 @@ import MapKit
 
 let isChinese = Locale.preferredLanguages.first?.hasPrefix("zh") ?? false
 func t(_ zh: String, _ en: String) -> String { isChinese ? zh : en }
-// 取自图标：结界蓝、门里那一点黄
-let brand = Color(red: 0x23 / 255, green: 0x59 / 255, blue: 1)
-let ember = Color(red: 1, green: 0xD9 / 255, blue: 0)
 let repoURL = URL(string: "https://github.com/WJSGZZ/Kekkai")!
 func displayName(_ app: AppEntry) -> String { (FileManager.default.displayName(atPath: app.path) as NSString).deletingPathExtension }
 
@@ -83,8 +80,27 @@ struct AddResult: Decodable {
 let tunableNames = ["allow_localhost": t("本机端口", "Ports on this Mac"), "allow_procinfo": t("其他进程信息", "Other processes"),
                     "allow_open": t("打开其他 App 与链接", "Opening other apps and links")]
 
+/// App 包里带着命令行、注入库和规则；第一次打开或版本变化时装到 ~/Library/Application Support/Kekkai/bin。
+/// 放在包外，是因为结界启动的软件要读注入库，而 /Applications 里的包随时可能被替换。
+enum Support {
+    static let dir = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support/Kekkai/bin")
+
+    static func install() {
+        guard let src = Bundle.main.resourceURL?.appendingPathComponent("support"),
+              let want = try? String(contentsOf: src.appendingPathComponent("build-id"), encoding: .utf8) else { return }
+        if (try? String(contentsOf: dir.appendingPathComponent("build-id"), encoding: .utf8)) == want { return }
+        let fm = FileManager.default
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        for name in (try? fm.contentsOfDirectory(atPath: src.path)) ?? [] {
+            let to = dir.appendingPathComponent(name)
+            try? fm.removeItem(at: to)
+            try? fm.copyItem(at: src.appendingPathComponent(name), to: to)
+        }
+    }
+}
+
 enum CLI {
-    static let path = NSHomeDirectory() + "/Library/Application Support/Kekkai/bin/kekkai"
+    static let path = Support.dir.appendingPathComponent("kekkai").path
     @discardableResult
     static func call(_ args: [String]) -> (ok: Bool, out: String) {
         let p = Process(), pipe = Pipe()
@@ -111,6 +127,7 @@ final class Store: ObservableObject {
     private var timer: Timer?
 
     init() {
+        Support.install()
         refresh()
         loadNever()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.refresh() }
@@ -170,7 +187,7 @@ final class Store: ObservableObject {
         if app.inside, let running = NSRunningApplication.runningApplications(withBundleIdentifier: app.id).first {
             running.activate()
         } else if app.running {
-            message = t("\(displayName(app)) 正在结界外运行。请先完全退出它，再从结界打开。", "\(displayName(app)) is running outside Kekkai. Quit it completely first.")
+            message = t("\(displayName(app)) 正在结界外运行，请先退出后再打开。", "\(displayName(app)) is running outside Kekkai. Quit it completely first.")
         } else {
             open(path: app.path)
         }
@@ -230,7 +247,7 @@ struct Detail: View {
 
     var status: (String, Color) {
         if app.inside { return (t("在结界中运行", "Running in Kekkai"), .green) }
-        if app.running { return (t("在结界外运行，请先退出", "Running outside Kekkai. Quit it first."), .orange) }
+        if app.running { return (t("正在结界外运行", "Running outside Kekkai. Quit it first."), .orange) }
         return (t("未运行", "Not running"), .secondary)
     }
     func clock(_ tz: String?) -> String {
@@ -266,7 +283,7 @@ struct Detail: View {
                 Button(t("停止", "Stop")) { store.perform(["stop", app.path]) }.controlSize(.large)
             } else {
                 Menu {
-                    Button(t("在“应用程序”中创建结界入口", "Add a Kekkai Launcher to Applications")) { store.makeLauncher(app) }
+                    Button(t("在“应用程序”中创建入口", "Add a Kekkai Launcher to Applications")) { store.makeLauncher(app) }
                     Divider()
                     Button(t("从结界移除…", "Remove from Kekkai…")) { removing = true }
                 } label: { Text(t("在结界中打开", "Open in Kekkai")) } primaryAction: { store.open(path: app.path) }
@@ -307,15 +324,15 @@ struct Detail: View {
                 } header: { Text(t("允许访问的文件夹", "Allowed folders")) } footer: {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(app.sandboxed || app.mode == "space"
-                             ? t("其他文件一律不可见。它在自己的结界文件夹里运行：第一次打开时复制了它原来的数据，之后与原 App 分开，原 App 的数据不受影响。",
+                             ? t("仅可访问以上文件夹和自身数据。数据存放于独立的结界文件夹，首次打开时从原 App 复制，此后与原 App 相互独立。",
                                  "Everything else stays hidden. It runs in its own Kekkai folder: its existing data was copied in at first launch, and from then on it's separate from the original app, whose data stays untouched.")
-                             : t("其他文件一律不可见。它直接使用原来的数据（这个软件用书签记住数据位置，搬走会失效）。",
+                             : t("仅可访问以上文件夹和自身数据。该软件以书签记录数据位置，因此在原位置运行。",
                                  "Everything else stays hidden. It uses its existing data in place (this app remembers its data location with a bookmark, which breaks if moved)."))
                         if app.sandboxed || app.mode == "space" {
                             HStack(spacing: 14) {
                                 Button(t("从原 App 导入数据…", "Import Data from Original…")) { importing = true }
                                 if app.hasSpace {
-                                    Button(t("在访达中显示它的数据", "Show Its Data in Finder")) {
+                                    Button(t("在访达中显示数据", "Show Its Data in Finder")) {
                                         NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: app.space)
                                     }
                                 }
@@ -343,10 +360,10 @@ struct Detail: View {
                 } header: { Text(t("权限", "Permissions")) } footer: {
                     let auto = (app.autoEnabled ?? []).compactMap { tunableNames[$0] }
                     if !auto.isEmpty {
-                        Text(t("首次运行时自动开启了：\(auto.joined(separator: "、"))。不开它会启动失败。", "Turned on automatically at first launch: \(auto.joined(separator: ", ")). It failed to start without them."))
+                        Text(t("添加时自动开启：\(auto.joined(separator: "、"))（关闭后无法启动）。", "Turned on automatically at first launch: \(auto.joined(separator: ", ")). It failed to start without them."))
                             .foregroundStyle(.orange)
                     }
-                    Text(t("打开即允许，默认全部关闭。“你的钥匙串”关闭时，它用结界文件夹里自己的钥匙串，登录照样能记住，只是第一次要重新登录；“本机端口”指本机上其他程序开的网络服务，如代理面板、开发服务器；允许打开其他 App 后，被打开的 App 不在结界内。下次打开生效。",
+                    Text(t("开启即允许，默认全部关闭，更改在下次打开时生效。“你的钥匙串”关闭时使用结界文件夹内的独立钥匙串，首次需重新登录。“本机端口”指本机其他程序提供的网络服务，如代理面板、开发服务器。经它打开的其他 App 不受结界限制。",
                            "On means allowed; everything is off by default. With Your keychain off, the app gets its own keychain in its Kekkai folder, so sign-ins are still remembered after you sign in once. Ports on this Mac are network services opened by other programs here, such as proxy dashboards and dev servers. Apps it opens run outside Kekkai. Changes apply next launch."))
                         .foregroundStyle(.secondary)
                 }
@@ -370,19 +387,19 @@ struct Detail: View {
                         HStack {
                             Text(app.identity.map { "\($0.name) · \($0.serial)" } ?? t("下次打开时生成", "Created at next launch"))
                                 .foregroundStyle(.secondary).lineLimit(1).textSelection(.enabled)
-                            Button(t("换个身份", "New Identity")) { renewing = true }
+                            Button(t("重置设备身份", "Reset Device Identity")) { renewing = true }
                                 .disabled(app.identity == nil)
                         }
                     }
                 } header: { Text(t("伪装", "Disguise")) } footer: {
-                    Text(t("结界内时间 \(clock(app.tz))。它看到的序列号、硬件 UUID、网卡地址和电脑名都是结界给它的一套，每个软件各不相同，真实的读不到；机型、系统版本这类很多台 Mac 都一样的不改。换个身份后，它会把这里当成一台新 Mac，账号可能要重新验证；它自己存下的设备号要清空数据才会消失。下次打开生效。",
+                    Text(t("结界内时间：\(clock(app.tz))。序列号、硬件 UUID、网卡地址和电脑名为结界为该软件单独生成的值，各软件互不相同；机型、系统版本等非唯一信息保持不变。重置设备身份后，该软件会将本机识别为新设备，账号可能需要重新验证；软件自行保存的设备标识需清除数据后失效。更改在下次打开时生效。",
                            "Time inside: \(clock(app.tz)). The serial number, hardware UUID, network addresses and computer name it sees are a set Kekkai made for this app alone; it can't read the real ones. Things many Macs share, such as model and macOS version, are left as is. After New Identity it treats this as a new Mac and your account may ask you to verify again; device IDs the app saved itself go only when you clear its data. Changes apply next launch."))
                         .foregroundStyle(.secondary)
                 }
-                .confirmationDialog(t("给它换一套设备身份？", "Give it a new device identity?"), isPresented: $renewing) {
-                    Button(t("换个身份", "New Identity")) { set(["new-identity", app.id]) { $0.identity = nil } }
+                .confirmationDialog(t("重置设备身份？", "Reset device identity?"), isPresented: $renewing) {
+                    Button(t("重置设备身份", "Reset Device Identity")) { set(["new-identity", app.id]) { $0.identity = nil } }
                 } message: {
-                    Text(t("下次打开时，它会看到另一台 Mac 的序列号、硬件 UUID 和网卡地址。", "Next launch it will see another Mac's serial number, hardware UUID and network addresses."))
+                    Text(t("下次打开时将使用新的序列号、硬件 UUID 和网卡地址。", "Next launch it will see another Mac's serial number, hardware UUID and network addresses."))
                 }
 
                 Section {
@@ -393,7 +410,7 @@ struct Detail: View {
                         Button(t("本地网络", "Local Network")) { openPrivacy("Privacy_LocalNetwork") }
                     }
                 } header: { Text(t("由 macOS 管理的权限", "Permissions managed by macOS")) } footer: {
-                    Text(t("在系统设置里按 App 开关。本地网络在“隐私与安全性”页的列表里，控制它能否访问局域网设备。",
+                    Text(t("在系统设置中按 App 设置。“本地网络”位于“隐私与安全性”列表中，控制局域网设备的访问。",
                            "Set per app in System Settings. Local Network, listed on the Privacy & Security page, controls access to devices on your network."))
                         .foregroundStyle(.secondary)
                 }
@@ -403,12 +420,12 @@ struct Detail: View {
             .confirmationDialog(t("从结界移除 \(displayName(app))？", "Remove \(displayName(app)) from Kekkai?"), isPresented: $removing) {
                 Button(t("移除", "Remove"), role: .destructive) { store.perform(["remove", app.path]); store.selected = nil }
             } message: {
-                Text(t("只是从列表里拿掉。它的结界文件夹和设置会留着，以后再添加接着用。", "It's only taken off the list. Its Kekkai folder and settings stay, ready if you add it again."))
+                Text(t("仅从列表中移除。结界文件夹与设置将保留，重新添加后继续使用。", "It's only taken off the list. Its Kekkai folder and settings stay, ready if you add it again."))
             }
             .confirmationDialog(t("用原 App 的数据替换它在结界里的数据？", "Replace its data in Kekkai with the original app's data?"), isPresented: $importing) {
                 Button(t("导入", "Import"), role: .destructive) { store.perform(["import", app.path]) }
             } message: {
-                Text(t("它会先停止。原 App 的数据不动；结界文件夹里的数据会被替换。",
+                Text(t("软件将先停止。原 App 的数据不受影响，结界文件夹中的数据将被替换。",
                        "It stops first. The original app's data is untouched; the data in its Kekkai folder is replaced."))
             }
             .sheet(isPresented: $picking) {
@@ -542,33 +559,33 @@ struct BlockLogSection: View {
             if let l = log {
                 if l.gatekeeper == true {
                     VStack(alignment: .leading, spacing: 6) {
-                        Label(t("macOS 不让它运行：它从网上下载，且没有经过苹果公证。", "macOS won't run it: it was downloaded and isn't notarized by Apple."),
+                        Label(t("macOS 已阻止运行：该软件从网络下载且未经 Apple 公证。", "macOS won't run it: it was downloaded and isn't notarized by Apple."),
                               systemImage: "lock.shield").foregroundStyle(.orange)
-                        Text(t("确认来源可信，到“隐私与安全性”底部点“仍要打开”，再回到这里打开。", "If you trust it, click Open Anyway at the bottom of Privacy & Security, then open it here again."))
+                        Text(t("确认来源可信后，在“隐私与安全性”底部点按“仍要打开”，再从结界打开。", "If you trust it, click Open Anyway at the bottom of Privacy & Security, then open it here again."))
                             .foregroundStyle(.secondary)
                         Button(t("打开隐私与安全性", "Open Privacy & Security")) {
                             NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension")!)
                         }
                     }
                 } else if l.receipt == true {
-                    Label(t("这是 App Store 软件，启动时校验购买凭证，结界的副本过不了校验，无法在结界中运行。原版本身已有苹果沙盒，可以直接用原版。",
+                    Label(t("该软件为 App Store 版本，启动时校验购买凭证，结界副本无法通过校验。原版已受 Apple 沙盒保护，可直接使用。",
                             "This App Store app checks its purchase receipt at launch, and Kekkai's copy can't pass that check, so it can't run in Kekkai. The original already runs in Apple's sandbox, so use it directly."),
                           systemImage: "bag").foregroundStyle(.orange)
                 } else if let s = l.seconds, s < 60, l.exited != nil {
-                    Label(t("打开 \(s) 秒后就退出了（\(l.exitCode ?? "?")）。放行它需要的请求，再打开试试。",
+                    Label(t("打开 \(s) 秒后退出（\(l.exitCode ?? "?")）。可放行所需请求后重新打开。",
                             "Quit \(s) s after opening (\(l.exitCode ?? "?")). Allow what it needs, then open it again."),
                           systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 }
                 if !l.errors.isEmpty {
                     Fold(isOpen: Binding(get: { open.contains("errors") }, set: { if $0 { open.insert("errors") } else { open.remove("errors") } })) {
-                        Text(t("它自己的日志里有报错（\(l.errors.count)）", "Errors in its own log (\(l.errors.count))"))
+                        Text(t("软件日志中的错误（\(l.errors.count)）", "Errors in its own log (\(l.errors.count))"))
                     } content: {
                         ForEach(l.errors, id: \.self) { Text($0).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2) }
                     }
                 }
                 if changed && app.inside {
                     HStack {
-                        Text(t("已放行的请求重新打开后生效。", "Allowed requests take effect after reopening.")).foregroundStyle(.secondary)
+                        Text(t("放行的请求在重新打开后生效。", "Allowed requests take effect after reopening.")).foregroundStyle(.secondary)
                         Spacer()
                         Button(t("重新打开", "Reopen")) {
                             changed = false
@@ -586,7 +603,7 @@ struct BlockLogSection: View {
                 ProgressView().controlSize(.small)
             }
         } header: { Text(t("拦截记录", "Block Log")) } footer: {
-            Text(app.inside ? t("实时更新，以上请求均已拦截。最前面几条它可能真的需要，可以逐条放行。越权：超出它本职的探查。留意：可能正常，但你该知道。常规：系统框架自动发出，不影响使用。", "Updates live. Everything above is blocked. The first items may be needed for the app to work and can be allowed one by one. Overreach: probing beyond what the app is for. Worth a look: may be normal, but you should know. Routine: sent by system frameworks on their own, harmless to block.") : t("以上请求均已拦截。在结界中运行时实时更新。", "Everything above is blocked. Updates live while the app runs in Kekkai."))
+            Text(app.inside ? t("实时更新，以上请求均已拦截。排在最前的几项可能为正常运行所需，可逐项放行。越权：超出其功能所需的探查；留意：可能正常，但值得关注；常规：系统框架自动发出，不影响使用。", "Updates live. Everything above is blocked. The first items may be needed for the app to work and can be allowed one by one. Overreach: probing beyond what the app is for. Worth a look: may be normal, but you should know. Routine: sent by system frameworks on their own, harmless to block.") : t("以上请求均已拦截。在结界中运行时实时更新。", "Everything above is blocked. Updates live while the app runs in Kekkai."))
                 .foregroundStyle(.secondary)
         }
         .task(id: "\(app.id) \(app.inside)") {
@@ -665,7 +682,7 @@ struct LocationPicker: View {
                 }
             }
             HStack {
-                Text(pin.map { $0.name } ?? t("搜索地点，或在地图上点一下", "Search for a place, or click the map")).foregroundStyle(.secondary).lineLimit(1)
+                Text(pin.map { $0.name } ?? t("搜索地点，或在地图上点按选择", "Search for a place, or click the map")).foregroundStyle(.secondary).lineLimit(1)
                 Spacer()
                 if current != nil { Button(t("关闭虚拟位置", "Turn Off")) { done(nil); dismiss() } }
                 Button(t("取消", "Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
@@ -705,7 +722,7 @@ struct NeverList: View {
                 if panel.runModal() == .OK { panel.urls.forEach { store.loadNever(["never", "add", $0.path]) } }
             }
         } header: { Text(t("必定隔离的文件夹", "Always-blocked folders")) } footer: {
-            Text(t("从结界打开的软件一律碰不到这些文件夹，你给单个软件的放行也不例外。", "Apps opened from Kekkai can never reach these folders, even ones you allowed for a single app."))
+            Text(t("从结界打开的软件均无法访问以下文件夹，优先于单个软件的放行设置。", "Apps opened from Kekkai can never reach these folders, even ones you allowed for a single app."))
                 .foregroundStyle(.secondary)
         }
     }
@@ -726,14 +743,14 @@ struct SettingsView: View {
                         NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: "/Users/Shared/Kekkai.noindex")
                     }
                 } header: { Text(t("结界文件夹", "Kekkai folders")) } footer: {
-                    Text(t("每个软件的数据、副本和钥匙串都在这里，一个软件一个文件夹。名字带 .noindex，聚焦搜索不会收录。", "Each app's data, copy and keychain live here, one folder per app. The .noindex suffix keeps Spotlight out."))
+                    Text(t("各软件的数据、副本和钥匙串按软件分别存放于此。文件夹名带 .noindex 后缀，不被聚焦收录。", "Each app's data, copy and keychain live here, one folder per app. The .noindex suffix keeps Spotlight out."))
                         .foregroundStyle(.secondary)
                 }
                 Section {
-                    Label(t("权限全部关闭，用不了的在添加时试出来", "Every permission off; the ones an app can't do without are found when you add it"), systemImage: "hand.raised")
-                    Label(t("真实用户名和设备号对软件隐藏", "Your real user name and device IDs stay hidden"), systemImage: "person.crop.circle.badge.questionmark")
-                    Label(t("每个软件一个钥匙串，读不到你的", "Each app gets its own keychain and can't read yours"), systemImage: "key")
-                } header: { Text(t("新软件的默认", "Defaults for new apps")) }
+                    Label(t("权限默认全部关闭，必需项在添加时自动检测", "Every permission off; the ones an app can't do without are found when you add it"), systemImage: "hand.raised")
+                    Label(t("隐藏真实用户名与设备标识", "Your real user name and device IDs stay hidden"), systemImage: "person.crop.circle.badge.questionmark")
+                    Label(t("每个软件使用独立钥匙串", "Each app gets its own keychain and can't read yours"), systemImage: "key")
+                } header: { Text(t("默认设置", "Defaults for new apps")) }
             }
             .formStyle(.grouped)
             .tabItem { Label(t("通用", "General"), systemImage: "gearshape") }
@@ -742,7 +759,6 @@ struct SettingsView: View {
                 .tabItem { Label(t("关于", "About"), systemImage: "info.circle") }
         }
         .frame(width: 540, height: 500)
-        .tint(brand)
     }
 }
 
@@ -754,11 +770,11 @@ struct AboutView: View {
             Spacer()
             Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 104, height: 104)
             VStack(spacing: 4) {
-                Text(t("结界", "Kekkai")).font(.system(size: 30, weight: .semibold, design: .serif))
+                Text(t("结界", "Kekkai")).font(.title.weight(.semibold))
                 Text(t("Kekkai · 版本 \(version)", "Version \(version)")).font(.callout).foregroundStyle(.secondary)
             }
-            Text(t("让每个 Mac 软件只看得到自己的文件。\n不信任的软件，也可以放心地用。", "Every Mac app sees only its own files,\nso you can use the ones you don't trust."))
-                .font(.system(.body, design: .serif)).multilineTextAlignment(.center).foregroundStyle(.secondary)
+            Text(t("为每个 macOS 软件建立独立的运行环境，\n使其仅能访问自身数据。", "Every Mac app sees only its own files,\nso you can use the ones you don't trust."))
+                .multilineTextAlignment(.center).foregroundStyle(.secondary)
                 .padding(.top, 4)
             HStack(spacing: 10) {
                 Link(destination: repoURL) { Label("GitHub", systemImage: "chevron.left.forwardslash.chevron.right") }
@@ -777,35 +793,31 @@ struct AboutView: View {
     }
 }
 
-/// 网格里的一个软件：大图标、名字，在结界里运行时右下角一个绿点
+/// 网格里的一个软件，样式同访达的图标视图；在结界中运行时右下角有绿点
 struct AppTile: View {
     let app: AppEntry
     let selected: Bool
-    @State private var hover = false
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 4) {
             Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().interpolation(.high)
-                .frame(width: 72, height: 72)
+                .frame(width: 64, height: 64)
                 .overlay(alignment: .bottomTrailing) {
                     if app.inside {
-                        Circle().fill(.green).frame(width: 12, height: 12)
-                            .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 2.5))
+                        Circle().fill(.green).frame(width: 11, height: 11)
+                            .overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 2))
                             .accessibilityLabel(t("在结界中运行", "Running in Kekkai"))
                     }
                 }
-            Text(displayName(app)).font(.callout).lineLimit(2).multilineTextAlignment(.center)
-                .frame(height: 34, alignment: .top)
+                .padding(5)
+                .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.primary.opacity(0.1) : .clear))
+            Text(displayName(app)).font(.system(size: 12)).lineLimit(2).multilineTextAlignment(.center)
+                .padding(.horizontal, 4).padding(.vertical, 1)
+                .background(RoundedRectangle(cornerRadius: 4).fill(selected ? Color.accentColor : .clear))
+                .foregroundStyle(selected ? Color.white : Color.primary)
         }
-        .padding(.top, 18).padding(.bottom, 6).padding(.horizontal, 8).frame(width: 124)
-        .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(Color(nsColor: .controlBackgroundColor))
-            .shadow(color: .black.opacity(hover ? 0.12 : 0.06), radius: hover ? 10 : 5, y: hover ? 4 : 2))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(selected ? brand : .clear, lineWidth: 2))
-        .scaleEffect(hover ? 1.02 : 1)
-        .animation(.easeOut(duration: 0.15), value: hover)
-        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .onHover { hover = $0 }
+        .frame(width: 100, height: 112, alignment: .top)
+        .contentShape(Rectangle())
     }
 }
 
@@ -846,7 +858,7 @@ struct AddSheet: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(t("添加软件", "Add an App")).font(.title3.weight(.semibold))
-                Text(t("添加时会在结界里试运行一次，能正常启动才加进来。", "Kekkai runs it once as a trial and adds it only if it starts properly."))
+                Text(t("添加时将在结界中试运行，能正常启动的软件才会加入列表。", "Kekkai runs it once as a trial and adds it only if it starts properly."))
                     .font(.callout).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading).padding([.horizontal, .top], 20).padding(.bottom, 12)
@@ -891,22 +903,22 @@ struct AddSheet: View {
                     }
                 }
             if let r = result {
-                Text(r.ok ? t("已添加 \(name)", "\(name) added") : t("\(name) 不能在结界中运行", "\(name) can't run in Kekkai"))
+                Text(r.ok ? t("已添加 \(name)", "\(name) added") : t("\(name) 无法在结界中运行", "\(name) can't run in Kekkai"))
                     .font(.title3.weight(.semibold))
                 Group {
                     if r.ok {
                         let auto = r.autoEnabled.compactMap { tunableNames[$0] }
-                        Text(auto.isEmpty ? t("所有权限关着也能运行。它现在正在结界里运行，以后双击图标即可打开。", "It runs with every permission off. It's running in Kekkai now; double-click its icon to open it later.")
-                             : t("为了能运行，自动开启了：\(auto.joined(separator: "、"))。它现在正在结界里运行。", "To run, it needed: \(auto.joined(separator: ", ")). It's running in Kekkai now."))
+                        Text(auto.isEmpty ? t("所有权限关闭时运行正常，已在结界中打开。之后可双击图标启动。", "It runs with every permission off. It's running in Kekkai now; double-click its icon to open it later.")
+                             : t("已自动开启必需权限：\(auto.joined(separator: "、"))。已在结界中打开。", "To run, it needed: \(auto.joined(separator: ", ")). It's running in Kekkai now."))
                     } else {
-                        Text(r.reason + t("\n没有添加。", "\nIt wasn't added."))
+                        Text(r.reason + t("\n未添加。", "\nIt wasn't added."))
                     }
                 }
                 .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             } else {
-                Text(t("正在结界里试运行 \(name)", "Trying \(name) in Kekkai")).font(.title3.weight(.semibold))
+                Text(t("正在试运行 \(name)", "Trying \(name) in Kekkai")).font(.title3.weight(.semibold))
                 ProgressView().controlSize(.small)
-                Text(t("它会打开一会儿。所有权限关着撑得住就添加；撑不住会逐项试出它离不开的权限。通常二十多秒，最长约两分钟。",
+                Text(t("先在所有权限关闭的状态下运行；如无法正常运行，将逐项检测必需权限。通常约 20 秒，最长约 2 分钟。",
                        "It opens for a moment. If it holds up with every permission off, it's added; if not, Kekkai finds the permissions it can't do without. Usually about 20 seconds, at most about two minutes."))
                     .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             }
@@ -952,8 +964,7 @@ struct ContentView: View {
         HStack(spacing: 14) {
             Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 40, height: 40)
             VStack(alignment: .leading, spacing: 2) {
-                Text(t("结界", "Kekkai")).font(.system(size: 22, weight: .semibold, design: .serif))
-                Text(t("每个软件，只看得到自己。", "Every app sees only itself.")).font(.callout).foregroundStyle(.secondary)
+                Text(t("结界", "Kekkai")).font(.title2.weight(.semibold))
             }
             Spacer()
             Text(summary).font(.callout).foregroundStyle(.secondary).monospacedDigit()
@@ -967,7 +978,7 @@ struct ContentView: View {
             Divider().opacity(0.5)
             if store.apps.contains(where: { $0.added == true }) {
                 ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 124, maximum: 140), spacing: 14)], spacing: 16) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 100, maximum: 110), spacing: 8)], spacing: 12) {
                         ForEach(added) { app in
                             AppTile(app: app, selected: selection == app.id)
                                 .onTapGesture(count: 2) { store.launch(app) }
@@ -982,8 +993,8 @@ struct ContentView: View {
             } else {
                 VStack(spacing: 10) {
                     Image(systemName: "square.dashed").font(.system(size: 44, weight: .ultraLight)).foregroundStyle(.tertiary)
-                    Text(t("还没有软件", "No apps yet")).font(.system(.title3, design: .serif).weight(.medium))
-                    Text(t("添加后，它只看得到自己的数据。", "Once added, an app sees only its own data.")).foregroundStyle(.secondary)
+                    Text(t("还没有软件", "No apps yet")).font(.title3.weight(.medium))
+                    Text(t("添加的软件仅能访问自身数据。", "Once added, an app sees only its own data.")).foregroundStyle(.secondary)
                     Button(t("添加软件…", "Add an App…")) { adding = true }.controlSize(.large).padding(.top, 6)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -991,7 +1002,6 @@ struct ContentView: View {
         }
         .frame(minWidth: 600, minHeight: 440)
         .navigationTitle("")
-        .tint(brand)
         .searchable(text: $query, placement: .toolbar, prompt: t("搜索", "Search"))
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -1041,7 +1051,7 @@ struct ContentView: View {
         Divider()
         Button(t("在“应用程序”中创建入口", "Add a Launcher to Applications")) { store.makeLauncher(app) }
         if app.hasSpace {
-            Button(t("在访达中显示它的数据", "Show Its Data in Finder")) { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: app.space) }
+            Button(t("在访达中显示数据", "Show Its Data in Finder")) { NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: app.space) }
         }
         Divider()
         Button(t("从结界移除", "Remove from Kekkai")) { store.perform(["remove", app.path]); if selection == app.id { selection = nil } }

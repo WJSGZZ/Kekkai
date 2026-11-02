@@ -33,7 +33,9 @@ NO_LIST = ["/Library/Application Support", "/Library/Preferences", "/Library/Lau
            "/Library/PrivilegedHelperTools", "/Library/Extensions", "/opt", "/usr/local"]
 ROOT = Path(__file__).resolve().parent
 STATE = Path(HOME, "Library/Application Support/Kekkai")
-SPACES = Path("/Users/Shared/Kekkai")
+# .noindex 让聚焦搜索不收录里面的副本和数据，不然搜软件会冒出一堆（实测 .metadata_never_index 对文件夹无效）
+SPACES = Path("/Users/Shared/Kekkai.noindex")
+OLD_SPACES = Path("/Users/Shared/Kekkai")
 LIBDIR = SPACES / ".lib"  # 注入库放这里：路径里没有你的用户名，软件看得到它的环境变量
 OWN_BASES = ["Application Support", "Caches", "Preferences", "Logs", "HTTPStorages", "WebKit", "Cookies",
              "Saved Application State", "Containers", "Group Containers", "Application Scripts"]
@@ -1100,7 +1102,20 @@ def list_apps():
     print(json.dumps(out, ensure_ascii=False))
 
 
+def migrate_spaces():
+    """旧位置搬到 .noindex，旧路径留一个链接，软件存下的旧绝对路径照样能用。有软件正在里面运行就先不搬。"""
+    global SPACES, LIBDIR
+    if not OLD_SPACES.is_dir() or OLD_SPACES.is_symlink():
+        return
+    if SPACES.exists() or any(job_state(p.name)[0] for p in OLD_SPACES.iterdir()):
+        SPACES, LIBDIR = OLD_SPACES, OLD_SPACES / ".lib"
+        return
+    os.rename(OLD_SPACES, SPACES)
+    OLD_SPACES.symlink_to(SPACES)
+
+
 def main():
+    migrate_spaces()
     a = sys.argv[1:]
     if a == ["list"]:
         return list_apps()

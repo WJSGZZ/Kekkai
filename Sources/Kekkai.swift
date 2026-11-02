@@ -5,6 +5,10 @@ import MapKit
 
 let isChinese = Locale.preferredLanguages.first?.hasPrefix("zh") ?? false
 func t(_ zh: String, _ en: String) -> String { isChinese ? zh : en }
+// 取自图标：结界蓝、门里那一点黄
+let brand = Color(red: 0x23 / 255, green: 0x59 / 255, blue: 1)
+let ember = Color(red: 1, green: 0xD9 / 255, blue: 0)
+let repoURL = URL(string: "https://github.com/WJSGZZ/Kekkai")!
 func displayName(_ app: AppEntry) -> String { (FileManager.default.displayName(atPath: app.path) as NSString).deletingPathExtension }
 
 // 中国大陆的地图用 GCJ-02（“火星坐标”），软件从系统拿到的定位是 GPS 用的 WGS-84，相差约几百米
@@ -678,37 +682,98 @@ struct LocationPicker: View {
     }
 }
 
-struct NeverSheet: View {
+/// 必定隔离的文件夹：任何软件都碰不到，优先于任何放行
+struct NeverList: View {
     @ObservedObject var store: Store
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(t("必定隔离的文件夹", "Always-Blocked Folders")).font(.title3.weight(.semibold))
-            Text(t("从结界打开的 App 一律无法访问，优先于任何放行。", "Apps opened from Kekkai can never access these. This overrides any allowed folder."))
-                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            List(store.never, id: \.self) { p in
+        Section {
+            if store.never.isEmpty { Text(t("无", "None")).foregroundStyle(.secondary) }
+            ForEach(store.never, id: \.self) { p in
                 HStack {
-                    Text(p).lineLimit(1).truncationMode(.middle)
+                    Image(systemName: "lock.fill").foregroundStyle(.secondary).font(.caption)
+                    Text((p as NSString).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.middle)
                     Spacer()
-                    Button(t("移除", "Remove")) { store.loadNever(["never", "rm", p]) }
+                    Button(t("移除", "Remove")) { store.loadNever(["never", "rm", p]) }.buttonStyle(.link)
                 }
             }
-            .frame(minHeight: 180)
-            HStack {
-                Button(t("添加文件夹…", "Add Folder…")) {
-                    let panel = NSOpenPanel()
-                    panel.canChooseDirectories = true
-                    panel.canChooseFiles = false
-                    panel.allowsMultipleSelection = true
-                    if panel.runModal() == .OK { panel.urls.forEach { store.loadNever(["never", "add", $0.path]) } }
-                }
-                Spacer()
-                Button(t("完成", "Done")) { dismiss() }.keyboardShortcut(.defaultAction)
+            Button(t("添加文件夹…", "Add Folder…")) {
+                let panel = NSOpenPanel()
+                panel.canChooseDirectories = true
+                panel.canChooseFiles = false
+                panel.allowsMultipleSelection = true
+                if panel.runModal() == .OK { panel.urls.forEach { store.loadNever(["never", "add", $0.path]) } }
             }
+        } header: { Text(t("必定隔离的文件夹", "Always-blocked folders")) } footer: {
+            Text(t("从结界打开的软件一律碰不到这些文件夹，你给单个软件的放行也不例外。", "Apps opened from Kekkai can never reach these folders, even ones you allowed for a single app."))
+                .foregroundStyle(.secondary)
         }
-        .padding(20)
-        .frame(width: 520)
+    }
+}
+
+struct SettingsView: View {
+    @ObservedObject var store = Store.shared
+
+    var body: some View {
+        TabView {
+            Form {
+                NeverList(store: store)
+                Section {
+                    LabeledContent(t("位置", "Location")) {
+                        Text("/Users/Shared/Kekkai.noindex").foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                    Button(t("在访达中显示", "Show in Finder")) {
+                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: "/Users/Shared/Kekkai.noindex")
+                    }
+                } header: { Text(t("结界文件夹", "Kekkai folders")) } footer: {
+                    Text(t("每个软件的数据、副本和钥匙串都在这里，一个软件一个文件夹。名字带 .noindex，聚焦搜索不会收录。", "Each app's data, copy and keychain live here, one folder per app. The .noindex suffix keeps Spotlight out."))
+                        .foregroundStyle(.secondary)
+                }
+                Section {
+                    Label(t("权限全部关闭，用不了的在添加时试出来", "Every permission off; the ones an app can't do without are found when you add it"), systemImage: "hand.raised")
+                    Label(t("真实用户名和设备号对软件隐藏", "Your real user name and device IDs stay hidden"), systemImage: "person.crop.circle.badge.questionmark")
+                    Label(t("每个软件一个钥匙串，读不到你的", "Each app gets its own keychain and can't read yours"), systemImage: "key")
+                } header: { Text(t("新软件的默认", "Defaults for new apps")) }
+            }
+            .formStyle(.grouped)
+            .tabItem { Label(t("通用", "General"), systemImage: "gearshape") }
+
+            AboutView()
+                .tabItem { Label(t("关于", "About"), systemImage: "info.circle") }
+        }
+        .frame(width: 540, height: 500)
+        .tint(brand)
+    }
+}
+
+struct AboutView: View {
+    var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "" }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Spacer()
+            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 104, height: 104)
+            VStack(spacing: 4) {
+                Text(t("结界", "Kekkai")).font(.system(size: 30, weight: .semibold, design: .serif))
+                Text(t("Kekkai · 版本 \(version)", "Version \(version)")).font(.callout).foregroundStyle(.secondary)
+            }
+            Text(t("让每个 Mac 软件只看得到自己的文件。\n不信任的软件，也可以放心地用。", "Every Mac app sees only its own files,\nso you can use the ones you don't trust."))
+                .font(.system(.body, design: .serif)).multilineTextAlignment(.center).foregroundStyle(.secondary)
+                .padding(.top, 4)
+            HStack(spacing: 10) {
+                Link(destination: repoURL) { Label("GitHub", systemImage: "chevron.left.forwardslash.chevron.right") }
+                Link(destination: repoURL.appendingPathComponent("issues")) { Label(t("反馈问题", "Report an Issue"), systemImage: "exclamationmark.bubble") }
+            }
+            .buttonStyle(.bordered).controlSize(.large).padding(.top, 8)
+            Spacer()
+            HStack(spacing: 6) {
+                Text("© 2026 Xik Pai")
+                Text("·")
+                Link(t("MIT 许可证", "MIT License"), destination: repoURL.appendingPathComponent("blob/main/LICENSE"))
+            }
+            .font(.caption).foregroundStyle(.tertiary).padding(.bottom, 16)
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -732,10 +797,14 @@ struct AppTile: View {
             Text(displayName(app)).font(.callout).lineLimit(2).multilineTextAlignment(.center)
                 .frame(height: 34, alignment: .top)
         }
-        .padding(.top, 14).padding(.horizontal, 8).frame(width: 116)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(selected ? Color.accentColor.opacity(0.16) : hover ? Color.primary.opacity(0.05) : .clear))
-        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(.top, 18).padding(.bottom, 6).padding(.horizontal, 8).frame(width: 124)
+        .background(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .fill(Color(nsColor: .controlBackgroundColor))
+            .shadow(color: .black.opacity(hover ? 0.12 : 0.06), radius: hover ? 10 : 5, y: hover ? 4 : 2))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(selected ? brand : .clear, lineWidth: 2))
+        .scaleEffect(hover ? 1.02 : 1)
+        .animation(.easeOut(duration: 0.15), value: hover)
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .onHover { hover = $0 }
     }
 }
@@ -864,7 +933,6 @@ struct ContentView: View {
     @State private var selection: String?
     @State private var query = ""
     @State private var dropping = false
-    @State private var showNever = false
     @State private var adding = false
     @State private var now = Date()
     private let tick = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
@@ -874,11 +942,32 @@ struct ContentView: View {
         return query.isEmpty ? all : all.filter { displayName($0).localizedCaseInsensitiveContains(query) || $0.name.localizedCaseInsensitiveContains(query) }
     }
 
+    var summary: String {
+        let all = store.apps.filter { $0.added == true }
+        let on = all.filter(\.inside).count
+        return on > 0 ? t("\(all.count) 个软件 · \(on) 个正在结界中", "\(all.count) apps · \(on) in Kekkai now") : t("\(all.count) 个软件", "\(all.count) apps")
+    }
+
+    var header: some View {
+        HStack(spacing: 14) {
+            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 40, height: 40)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(t("结界", "Kekkai")).font(.system(size: 22, weight: .semibold, design: .serif))
+                Text(t("每个软件，只看得到自己。", "Every app sees only itself.")).font(.callout).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(summary).font(.callout).foregroundStyle(.secondary).monospacedDigit()
+        }
+        .padding(.horizontal, 28).padding(.top, 18).padding(.bottom, 14)
+    }
+
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            header
+            Divider().opacity(0.5)
             if store.apps.contains(where: { $0.added == true }) {
                 ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 116, maximum: 132), spacing: 6)], spacing: 10) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 124, maximum: 140), spacing: 14)], spacing: 16) {
                         ForEach(added) { app in
                             AppTile(app: app, selected: selection == app.id)
                                 .onTapGesture(count: 2) { store.launch(app) }
@@ -887,21 +976,22 @@ struct ContentView: View {
                                 .help(t("双击在结界中打开", "Double-click to open in Kekkai"))
                         }
                     }
-                    .padding(24)
+                    .padding(28)
                 }
                 .background(Color(nsColor: .windowBackgroundColor).onTapGesture { selection = nil })
             } else {
                 VStack(spacing: 10) {
                     Image(systemName: "square.dashed").font(.system(size: 44, weight: .ultraLight)).foregroundStyle(.tertiary)
-                    Text(t("还没有软件", "No apps yet")).font(.title3.weight(.medium))
+                    Text(t("还没有软件", "No apps yet")).font(.system(.title3, design: .serif).weight(.medium))
                     Text(t("添加后，它只看得到自己的数据。", "Once added, an app sees only its own data.")).foregroundStyle(.secondary)
                     Button(t("添加软件…", "Add an App…")) { adding = true }.controlSize(.large).padding(.top, 6)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .frame(minWidth: 560, minHeight: 420)
-        .navigationTitle(t("结界", "Kekkai"))
+        .frame(minWidth: 600, minHeight: 440)
+        .navigationTitle("")
+        .tint(brand)
         .searchable(text: $query, placement: .toolbar, prompt: t("搜索", "Search"))
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -909,9 +999,7 @@ struct ContentView: View {
                     .help(t("添加软件", "Add an app"))
             }
             ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Button(t("必定隔离的文件夹…", "Always-Blocked Folders…")) { showNever = true }
-                } label: { Label(t("更多", "More"), systemImage: "ellipsis.circle") }
+                SettingsLink { Label(t("设置", "Settings"), systemImage: "gearshape") }.help(t("设置", "Settings"))
             }
         }
         .inspector(isPresented: Binding(get: { selection != nil }, set: { if !$0 { selection = nil } })) {
@@ -935,7 +1023,6 @@ struct ContentView: View {
         }
         .sheet(isPresented: $adding) { AddSheet(store: store, initialPath: nil) }
         .sheet(item: $store.pendingAdd) { AddSheet(store: store, initialPath: $0.path) }
-        .sheet(isPresented: $showNever) { NeverSheet(store: store) }
         .onReceive(tick) { now = $0 }
         .onReceive(store.$selected) { if let id = $0 { selection = id } }
         .alert(t("结界", "Kekkai"), isPresented: Binding(get: { store.message != nil }, set: { if !$0 { store.message = nil } })) {
@@ -965,6 +1052,9 @@ struct ContentView: View {
 struct KekkaiApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     var body: some Scene {
-        WindowGroup(t("结界", "Kekkai")) { ContentView() }.windowResizability(.contentMinSize)
+        WindowGroup(t("结界", "Kekkai")) { ContentView() }
+            .windowResizability(.contentMinSize)
+            .windowToolbarStyle(.unifiedCompact)
+        Settings { SettingsView() }
     }
 }

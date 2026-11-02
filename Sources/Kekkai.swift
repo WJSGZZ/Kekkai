@@ -171,7 +171,7 @@ struct Detail: View {
 
     var status: (String, Color) {
         if app.inside { return (t("在结界中运行", "Running in Kekkai"), .green) }
-        if app.running { return (t("在结界外运行，请先完全退出", "Running outside Kekkai. Quit it first."), .orange) }
+        if app.running { return (t("在结界外运行，请先退出", "Running outside Kekkai. Quit it first."), .orange) }
         return (t("未运行", "Not running"), .secondary)
     }
     func clock(_ tz: String?) -> String {
@@ -216,7 +216,7 @@ struct Detail: View {
             Form {
                 Section {
                     if app.allow.isEmpty {
-                        Text(t("没有。它只看得到自己的数据。", "None. It can only see its own data.")).foregroundStyle(.secondary)
+                        Text(t("无", "None")).foregroundStyle(.secondary)
                     }
                     ForEach(app.allow, id: \.self) { p in
                         HStack {
@@ -226,7 +226,7 @@ struct Detail: View {
                             Button(t("移除", "Remove")) { set(["allow", app.id, "rm", p]) { $0.allow.removeAll { $0 == p } } }
                         }
                     }
-                    Button(t("批准一个文件夹…", "Allow a Folder…")) {
+                    Button(t("添加文件夹…", "Add Folder…")) {
                         let panel = NSOpenPanel()
                         panel.canChooseDirectories = true
                         panel.canChooseFiles = false
@@ -238,13 +238,13 @@ struct Detail: View {
                     }
                 } header: { Text(t("允许访问的文件夹", "Allowed folders")) } footer: {
                     Text(app.sandboxed
-                         ? t("它照常用自己原来的数据，别的文件一律看不到。它自带苹果沙盒，结界会用一份去掉苹果沙盒的副本运行，原 App 不动；副本签名不同，可能要重新登录一次。", "It keeps using its own data and can't see anything else. Because it already has Apple's sandbox, Kekkai runs an unsandboxed copy and leaves the original alone. The copy is signed differently, so you may need to sign in once.")
-                         : t("它照常用自己原来的数据，别的文件一律看不到，包括下载、桌面和文稿。要存下载的文件时，批准一个文件夹给它。", "It keeps using its own data and can't see anything else, including Downloads, Desktop and Documents. If it needs to save downloads, allow a folder here."))
+                         ? t("以独立副本运行，数据与原 App 分开，需单独登录。", "Runs as a separate copy with its own data. Sign in separately.")
+                         : t("其他文件一律不可见。", "Everything else stays hidden."))
                         .foregroundStyle(.secondary)
                 }
 
                 Section {
-                    Toggle(t("允许打开其他软件和链接", "Allow opening other apps and links"), isOn: Binding(
+                    Toggle(t("允许打开其他 App 和链接", "Allow opening other apps and links"), isOn: Binding(
                         get: { app.allowOpen },
                         set: { v in set(["set-open", app.id, v ? "on" : "off"]) { $0.allowOpen = v } }))
                     Toggle(t("禁止剪贴板和拖放", "Block clipboard and drag and drop"), isOn: Binding(
@@ -266,7 +266,7 @@ struct Detail: View {
                         }
                     }
                 } header: { Text(t("隔离", "Isolation")) } footer: {
-                    Text(t("结界内显示 \(clock(app.tz))。它拉起的软件不在结界里，所以默认不许它打开其他软件，也不能用浏览器打开链接，要用时再打开。剪贴板关掉后复制、粘贴都不能用。虚拟位置只骗过向系统要定位的软件，按 IP 判断位置的骗不过；开启后会用副本运行。设置会记住，下次打开生效。", "Shows \(clock(app.tz)) inside. Apps it launches run outside Kekkai, so by default it can't open other apps or open links in your browser; turn this on when you need it. With the clipboard blocked, copy and paste stop working. A virtual location fools apps that ask macOS for your location, not ones that use your IP address, and the app runs as a copy. Settings are saved and apply next launch."))
+                    Text(t("结界内时间 \(clock(app.tz))。打开其他 App 可能绕过结界。下次打开生效。", "Time inside: \(clock(app.tz)). Opening other apps can bypass Kekkai. Changes apply next launch."))
                         .foregroundStyle(.secondary)
                 }
 
@@ -277,18 +277,18 @@ struct Detail: View {
                         Button(t("定位", "Location")) { openPrivacy("Privacy_LocationServices") }
                     }
                 } header: { Text(t("系统权限", "System permissions")) } footer: {
-                    Text(t("这些由系统按软件管理，从哪里打开都生效，在系统设置里关掉即可。", "macOS manages these for each app, however it's opened. Turn them off in System Settings."))
+                    Text(t("由 macOS 按 App 管理。", "Managed by macOS for each app."))
                         .foregroundStyle(.secondary)
                 }
 
                 Section {
                     HStack {
                         Button(t("拦截记录", "Block Log")) { store.showBlocked(path: app.path) }
-                        Button(t("再试运行一次…", "Trial Run…")) { trying = true }.disabled(app.running && !app.inside)
+                        Button(t("试运行…", "Trial Run…")) { trying = true }.disabled(app.running && !app.inside)
                         Spacer()
                     }
                 } header: { Text(t("记录", "Logs")) } footer: {
-                    Text(t("第一次打开会先试运行：用最小权限打开，把它要过的东西列出来，你逐条允许或拒绝。拦截记录：它想碰却被挡下的东西，每次打开都会累积。", "The first launch is a trial run: it opens with minimal access and lists what the app asked for, so you can allow or deny each request. Block Log lists what it tried to reach and was refused, collected across launches."))
+                    Text(t("试运行：以最小权限运行，列出被拒请求。拦截记录：历次被拒请求。", "Trial Run lists what was denied at minimal access. Block Log collects denials across launches."))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -355,7 +355,7 @@ struct TrialSheet: View {
                 }
                 HStack(spacing: 6) {
                     Text(item.category).font(.caption).foregroundStyle(.secondary)
-                    if item.suspect { Text(t("可能是它退出的原因", "May be why it quit")).font(.caption.weight(.semibold)).foregroundStyle(.orange) }
+                    if item.suspect { Text(t("疑似退出原因", "Likely cause")).font(.caption.weight(.semibold)).foregroundStyle(.orange) }
                     else if item.suspicious { Text(t("可疑", "Suspicious")).font(.caption.weight(.semibold)).foregroundStyle(.red) }
                 }
             }
@@ -365,7 +365,7 @@ struct TrialSheet: View {
             } else {
                 Button(t("拒绝", "Deny")) { decide(item, "deny") }
                 Button(t("允许", "Allow")) { decide(item, "allow") }.disabled(item.grant.isEmpty)
-                    .help(item.grant.isEmpty ? t("这一项不能单独放行", "This one can't be allowed on its own") : "")
+                    .help(item.grant.isEmpty ? t("不可放行", "Can't be allowed") : "")
             }
         }
         .padding(.vertical, 2)
@@ -382,22 +382,22 @@ struct TrialSheet: View {
                     let main = items.filter { !$0.normal }, normal = items.filter { $0.normal }
                     let troubled = r.alive == true && (!(r.errors ?? []).isEmpty || r.systemDenied == true)
                     if troubled {
-                        Label(t("它还开着，但出了错，可能没法正常用。看下面的报错和标橙色的请求。", "It's still open but hit errors, so it may not work properly. See the errors and the requests marked in orange."), systemImage: "exclamationmark.triangle.fill")
+                        Label(t("仍在运行，但出现错误。", "Still running, but errors occurred."), systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                         ForEach(r.errors ?? [], id: \.self) { Text($0).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2) }
                     } else {
                     Label(r.alive == true
-                          ? t("在最小权限下正常运行了 \(r.seconds ?? 40) 秒。下面这些被拒绝了也没影响，可以放心拒绝。", "It ran normally for \(r.seconds ?? 40) seconds with minimal access. Denying the requests below didn't stop it, so it's safe to deny them.")
-                          : t("它中途退出了（退出码 \(r.exitCode ?? "?")）。看看标着“可能是它退出的原因”的那几条，允许后再试一次。", "It quit (exit code \(r.exitCode ?? "?")). Check the requests marked “May be why it quit”, allow what makes sense, then try again."),
+                          ? t("以最小权限正常运行 \(r.seconds ?? 40) 秒。", "Ran normally for \(r.seconds ?? 40) s with minimal access.")
+                          : t("已退出，退出码 \(r.exitCode ?? "?")。", "Quit with exit code \(r.exitCode ?? "?")."),
                           systemImage: r.alive == true ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(r.alive == true ? .green : .orange)
                         .fixedSize(horizontal: false, vertical: true)
                     }
                     List {
-                        if main.isEmpty { Text(t("没有被拒绝的请求。", "No requests were denied.")).foregroundStyle(.secondary) }
+                        if main.isEmpty { Text(t("无被拒请求", "No denied requests")).foregroundStyle(.secondary) }
                         ForEach(main.sorted { ($0.suspect ? 0 : 1, $0.decision == nil ? 0 : 1) < ($1.suspect ? 0 : 1, $1.decision == nil ? 0 : 1) }) { row($0) }
                         if !normal.isEmpty {
-                            DisclosureGroup(t("还有 \(normal.count) 条系统的常规请求，拒绝了也不影响", "\(normal.count) routine system requests, safe to leave denied"), isExpanded: $showNormal) {
+                            DisclosureGroup(t("系统常规请求（\(normal.count)）", "Routine system requests (\(normal.count))"), isExpanded: $showNormal) {
                                 ForEach(normal) { row($0) }
                             }
                         }
@@ -407,7 +407,7 @@ struct TrialSheet: View {
             } else {
                 HStack(spacing: 10) {
                     ProgressView().controlSize(.small)
-                    Text(t("正在用最小权限打开它，观察约 40 秒…", "Opening it with minimal access and watching for about 40 seconds…")).foregroundStyle(.secondary)
+                    Text(t("正在以最小权限运行，约 40 秒…", "Running with minimal access, about 40 s…")).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, minHeight: 280)
             }
@@ -514,7 +514,7 @@ struct NeverSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(t("必定隔离的文件夹", "Always-Blocked Folders")).font(.title3.weight(.semibold))
-            Text(t("从结界打开的软件，包括学习模式，都看不到这些文件夹，优先级高于任何放行。", "Apps opened from Kekkai, including in Learn Mode, can't see these folders. This overrides every other rule."))
+            Text(t("从结界打开的 App 一律无法访问，优先于任何放行。", "Apps opened from Kekkai can never access these. This overrides any allowed folder."))
                 .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             List(store.never, id: \.self) { p in
                 HStack {
@@ -572,8 +572,8 @@ struct ContentView: View {
                     Detail(app: app, store: store, now: now)
                 } else {
                     VStack(spacing: 8) {
-                        Text(t("选一个 App，或把 App 拖到这里", "Choose an app, or drag one here")).font(.title3)
-                        Text(t("结界里的软件只看得到自己的数据", "Apps in Kekkai can only see their own files")).foregroundStyle(.secondary)
+                        Text(t("选择或拖入一个 App", "Choose or drop an app")).font(.title3)
+                        Text(t("让它只看得到自己的数据", "It sees only its own data")).foregroundStyle(.secondary)
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }

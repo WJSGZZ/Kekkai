@@ -57,7 +57,8 @@ Tested on macOS 27.2:
 | App | Result |
 |---|---|
 | Baidu Netdisk | Runs in its Kekkai folder, stays signed in after its data is copied in, and fetches its file list. Downloads, Desktop and Documents are hidden, and an allowed folder can be read and written |
-| Tencent Meeting | Moved into a Kekkai folder it lost its sign-in (it tracks its data with a bookmark); run in place it stays signed in. Its Block Log shows that at launch it checks for Chrome, ChatGPT and a test copy of Chrome in `~/.cache`, all blocked |
+| Tencent Meeting (direct download) | It checks its own signature, so a copy won't run. In a Kekkai folder it asks you to re-grant its data folder at every launch (it tracks its data with a bookmark and lacks the entitlement to make a new one), so it runs in place and stays signed in. Its Block Log shows that at launch it checks for Chrome, ChatGPT and a test copy of Chrome in `~/.cache`, all blocked |
+| Tencent Meeting (App Store, VooV Meeting) | The unsandboxed copy runs in its Kekkai folder and reaches the sign-in screen with no prompts; the fake user and device can be injected |
 | WeChat DevTools | Runs in its Kekkai folder with its project history carried over and no errors; with its own keychain, you scan the sign-in code once more |
 | QQ, WeChat | The unsandboxed copy reaches the QR sign-in screen, and a 40-second trial run shows no errors. In one session QQ was logged looking at other processes more than 600 times and checking which apps you have 15 times. At launch WeChat tries to list the shared temp and cache folders and is blocked. The copy keeps its own data (see below) |
 

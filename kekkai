@@ -893,7 +893,7 @@ def run(app, learn=False):
     rule, conf = load_rule(bundle_id), settings().get(bundle_id, {})
     fake = conf.get("location")
     groups = app_groups(app)
-    if sandboxed or fake:  # 虚拟定位要注入，原版的强化运行时不允许，也用副本
+    if sandboxed or fake and not injectable(app):  # 虚拟定位要注入，原版的强化运行时不允许，用副本
         app = local_copy(app, bundle_id)
     binary = f"{app}/Contents/MacOS/{exe}"
     if subprocess.run(["pgrep", "-f", "^" + re.escape(binary)], capture_output=True).returncode == 0:

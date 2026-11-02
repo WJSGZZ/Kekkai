@@ -57,6 +57,7 @@ struct AppEntry: Codable, Identifiable, Equatable {
     var mode: String
     var allow: [String]
     var allowOpen: Bool
+    var reviewed: Bool
     let space: String
 }
 
@@ -166,6 +167,7 @@ struct Detail: View {
     @ObservedObject var store: Store
     let now: Date
     @State private var picking = false
+    @State private var trying = false
 
     var status: (String, Color) {
         if app.inside { return (t("在结界中运行", "Running in Kekkai"), .green) }
@@ -198,7 +200,9 @@ struct Detail: View {
             if app.inside {
                 Button(t("停止", "Stop")) { store.perform(["stop", app.path]) }.controlSize(.large)
             } else {
-                Button(t("在结界中打开", "Open in Kekkai")) { store.open(path: app.path) }
+                Button(app.reviewed ? t("在结界中打开", "Open in Kekkai") : t("试运行并打开", "Try and Open")) {
+                    if app.reviewed { store.open(path: app.path) } else { trying = true }
+                }
                     .buttonStyle(.borderedProminent).controlSize(.large)
                     .keyboardShortcut(.defaultAction).disabled(app.running)
             }
@@ -280,17 +284,16 @@ struct Detail: View {
                 Section {
                     HStack {
                         Button(t("拦截记录", "Block Log")) { store.showBlocked(path: app.path) }
-                        Button(t("学习模式（不隔离）", "Learn Mode (No Isolation)")) { store.perform(["learn", app.path]) }
-                            .disabled(app.running || app.inside)
-                        Button(t("学习记录", "Learn Log")) { store.showReport(path: app.path) }
+                        Button(t("再试运行一次…", "Trial Run…")) { trying = true }.disabled(app.running && !app.inside)
                         Spacer()
                     }
                 } header: { Text(t("记录", "Logs")) } footer: {
-                    Text(t("拦截记录：它想碰却被挡下的东西，每次打开都会累积。学习模式：不隔离地跑一次，记下它碰过的所有地方。", "Block Log lists what it tried to reach and was refused, collected across launches. Learn Mode runs it once without isolation and records everywhere it went."))
+                    Text(t("第一次打开会先试运行：用最小权限打开，把它要过的东西列出来，你逐条允许或拒绝。拦截记录：它想碰却被挡下的东西，每次打开都会累积。", "The first launch is a trial run: it opens with minimal access and lists what the app asked for, so you can allow or deny each request. Block Log lists what it tried to reach and was refused, collected across launches."))
                         .foregroundStyle(.secondary)
                 }
             }
             .formStyle(.grouped)
+            .sheet(isPresented: $trying) { TrialSheet(app: app, store: store) }
             .sheet(isPresented: $picking) {
                 LocationPicker(current: app.location) { place in
                     store.update(app.id) { $0.location = place }
@@ -298,6 +301,119 @@ struct Detail: View {
                 }
             }
         }
+    }
+}
+
+struct TrialItem: Codable, Identifiable {
+    var id: String { key }
+    let key, op, target, verb, category, time, grant: String
+    let count: Int
+    let suspicious, normal, suspect: Bool
+    var decision: String?
+}
+
+struct TrialResult: Codable {
+    let alive: Bool?
+    let exitCode: String?
+    let seconds: Int?
+    let items: [TrialItem]?
+    let error: String?
+}
+
+struct TrialSheet: View {
+    let app: AppEntry
+    @ObservedObject var store: Store
+    @Environment(\.dismiss) private var dismiss
+    @State private var result: TrialResult?
+    @State private var showNormal = false
+
+    func start() {
+        result = nil
+        DispatchQueue.global().async {
+            let r = CLI.call(["trial", app.path])
+            let decoded = try? JSONDecoder().decode(TrialResult.self, from: Data(r.out.utf8))
+            DispatchQueue.main.async { result = decoded ?? TrialResult(alive: nil, exitCode: nil, seconds: nil, items: nil, error: r.out) }
+        }
+    }
+    func decide(_ item: TrialItem, _ choice: String) {
+        if let i = result?.items?.firstIndex(where: { $0.key == item.key }) {
+            var items = result!.items!
+            items[i].decision = choice
+            result = TrialResult(alive: result!.alive, exitCode: result!.exitCode, seconds: result!.seconds, items: items, error: nil)
+        }
+        store.perform(["decide", app.id, choice, item.key])
+    }
+
+    func row(_ item: TrialItem) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(item.verb).foregroundStyle(.secondary)
+                    Text((item.target as NSString).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.middle)
+                }
+                HStack(spacing: 6) {
+                    Text(item.category).font(.caption).foregroundStyle(.secondary)
+                    if item.suspect { Text(t("可能是它退出的原因", "May be why it quit")).font(.caption.weight(.semibold)).foregroundStyle(.orange) }
+                    else if item.suspicious { Text(t("可疑", "Suspicious")).font(.caption.weight(.semibold)).foregroundStyle(.red) }
+                }
+            }
+            Spacer()
+            if let d = item.decision {
+                Text(d == "allow" ? t("已允许", "Allowed") : t("已拒绝", "Denied")).foregroundStyle(.secondary)
+            } else {
+                Button(t("拒绝", "Deny")) { decide(item, "deny") }
+                Button(t("允许", "Allow")) { decide(item, "allow") }.disabled(item.grant.isEmpty)
+                    .help(item.grant.isEmpty ? t("这一项不能单独放行", "This one can't be allowed on its own") : "")
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(t("试运行 \(displayName(app))", "Trial run: \(displayName(app))")).font(.title3.weight(.semibold))
+            if let r = result {
+                if let e = r.error, !e.isEmpty {
+                    Text(e).foregroundStyle(.red)
+                } else {
+                    let items = r.items ?? []
+                    let main = items.filter { !$0.normal }, normal = items.filter { $0.normal }
+                    Label(r.alive == true
+                          ? t("在最小权限下正常运行了 \(r.seconds ?? 40) 秒。下面这些被拒绝了也没影响，可以放心拒绝。", "It ran normally for \(r.seconds ?? 40) seconds with minimal access. Denying the requests below didn't stop it, so it's safe to deny them.")
+                          : t("它中途退出了（退出码 \(r.exitCode ?? "?")）。看看标着“可能是它退出的原因”的那几条，允许后再试一次。", "It quit (exit code \(r.exitCode ?? "?")). Check the requests marked “May be why it quit”, allow what makes sense, then try again."),
+                          systemImage: r.alive == true ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(r.alive == true ? .green : .orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                    List {
+                        if main.isEmpty { Text(t("没有被拒绝的请求。", "No requests were denied.")).foregroundStyle(.secondary) }
+                        ForEach(main.sorted { ($0.suspect ? 0 : 1, $0.decision == nil ? 0 : 1) < ($1.suspect ? 0 : 1, $1.decision == nil ? 0 : 1) }) { row($0) }
+                        if !normal.isEmpty {
+                            DisclosureGroup(t("还有 \(normal.count) 条系统的常规请求，拒绝了也不影响", "\(normal.count) routine system requests, safe to leave denied"), isExpanded: $showNormal) {
+                                ForEach(normal) { row($0) }
+                            }
+                        }
+                    }
+                    .frame(minHeight: 280)
+                }
+            } else {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text(t("正在用最小权限打开它，观察约 40 秒…", "Opening it with minimal access and watching for about 40 seconds…")).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, minHeight: 280)
+            }
+            HStack {
+                if let items = result?.items, items.contains(where: { $0.decision == nil && !$0.normal }) {
+                    Button(t("其余全部拒绝", "Deny the Rest")) { items.filter { $0.decision == nil && !$0.normal }.forEach { decide($0, "deny") } }
+                }
+                Spacer()
+                Button(t("再试一次", "Try Again"), action: start).disabled(result == nil)
+                Button(t("完成", "Done")) { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 640, height: 520)
+        .onAppear(perform: start)
     }
 }
 

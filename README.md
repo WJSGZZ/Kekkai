@@ -38,7 +38,7 @@ Quit the app completely before opening it from Kekkai. Copies launched## Feature
 - **Virtual location.** Search for a place or click the map, and that's the location the app gets whenever it asks macOS. There's no permission prompt, and the real location never reaches the app. In mainland China, the map's GCJ-02 coordinates are converted to the GPS (WGS-84) coordinates apps expect. The app runs as a copy while this is on. Apps that work out your location from your IP address need a proxy instead.
 - **No escaping through other apps.** Apps launched through macOS run outside Kekkai (in testing, a helper launched this way went on to ask for Desktop access). So by default the app can't open other apps or send them automation commands. The catch is that links won't open in your browser; turn on "Allow opening other apps and links" on the detail page when you need that.
 - **Block Log.** Every launch adds what the app tried to reach and was refused, grouped into categories such as "Checking which apps you have" and "Your personal files".
-- **Learn Mode.** Run an app once without isolation to log which outside paths it touches. Useful when writing rules for unusual apps.
+- **Trial run, then you decide.** The first time you open an app, Kekkai runs it with minimal access for about 40 seconds to see whether it works, then lists every request it denied, flagging suspicious ones such as checking which apps you have. Allow or deny each one. If the app quits, the requests denied just before it quit are flagged so you can allow them and try again. The macOS sandbox refuses on the spot and can't pause to ask, so you decide after the run rather than in a pop-up. Shared parent folders that would expose other apps' data, such as `~/Library/HTTPStorages`, can't be allowed.
 
 The interface follows your system language (English or Chinese).
 
@@ -82,7 +82,8 @@ So:
 The interface runs a Python script installed at `~/Library/Application Support/Kekkai/bin/kekkai`:
 
 ```text
-kekkai run|learn|stop|report <App.app>
+kekkai run|trial|stop|blocked <App.app>
+kekkai decide <bundle id> allow|deny <operation> <target>
 kekkai list
 kekkai allow <bundle id> add|rm <folder>
 kekkai set-tz <bundle id> <time zone|->

@@ -1,7 +1,7 @@
 #!/usr/bin/python3 -I
 """结界 Kekkai：让 macOS App 只看得到自己的文件。
 用法:
-  kekkai run|learn|stop|report|reset|blocked <App.app>
+  kekkai run|trial|learn|stop|report|reset|blocked <App.app>
   kekkai list
   kekkai set-tz <bundle id> <时区|->
   kekkai set-mode <bundle id> <space|real>
@@ -9,6 +9,7 @@
   kekkai set-block <bundle id> clipboard <on|off>
   kekkai set-open <bundle id> <on|off>
   kekkai allow <bundle id> add|rm <文件夹>
+  kekkai decide <bundle id> allow|deny <操作> <对象>
   kekkai set-location <bundle id> <WGS-84 纬度> <经度> [名称] | -
   kekkai never list|add|rm [路径]
 """
@@ -399,7 +400,11 @@ def verb(op):
     return t("连", "call") if op == "mach-lookup" else t("看", "view")
 
 
-NORMAL = ("查你的真实用户名", "Looking up your real user name", "连接系统服务", "Connecting to system services")
+NORMAL = ("查你的真实用户名", "Looking up your real user name", "连接系统服务", "Connecting to system services",
+          "查看系统进程", "Looking at system processes")
+# 图形软件的系统框架自己会查这些进程【推断，依据是各软件都有这几条】
+SYSTEM_PROCS = {"WindowServer", "initproc", "launchd", "WindowManager", "MenuBarAgent", "Dock", "loginwindow",
+                "ControlCenter", "SystemUIServer", "ScreenTimeSettingsAgent", "NotificationCenter"}
 
 
 def categorize(op, target, app=""):
@@ -408,7 +413,11 @@ def categorize(op, target, app=""):
     if app and target.startswith(app + "/"):
         return t("改动自己的安装目录", "Changing its own app bundle")
     if op.startswith("process-info"):
+        if target in SYSTEM_PROCS:
+            return t("查看系统进程", "Looking at system processes")
         return t("查看其他进程", "Looking at other processes")
+    if op in ("lsopen", "appleevent-send"):
+        return t("打开其他软件", "Opening other apps")
     if op == "mach-lookup":
         if "opendirectoryd" in target:
             return t("查你的真实用户名", "Looking up your real user name")
@@ -432,6 +441,106 @@ def categorize(op, target, app=""):
     return t("其他", "Other")
 
 
+def now():
+    return subprocess.run(["date", "+%Y-%m-%d %H:%M:%S"], capture_output=True, text=True).stdout.strip()
+
+
+def denials(app, start):
+    """系统日志里这个软件（含附带的小程序）从 start 起被沙盒拒绝的请求：[(时间, 操作, 对象)]。"""
+    exes = {plistlib.load(open(p, "rb")).get("CFBundleExecutable") for p in Path(app, "Contents").rglob("Info.plist")
+            if p.parent.name == "Contents"}
+    r = subprocess.run(["/usr/bin/log", "show", "--start", start, "--style", "compact",
+                        "--predicate", 'senderImagePath CONTAINS "Sandbox" AND eventMessage CONTAINS " deny("'],
+                       capture_output=True, text=True, errors="replace")
+    out = []
+    for line in r.stdout.splitlines():
+        m = re.search(r"Sandbox: (.+?)\(\d+\) deny\(\d+\) (\S+) (.*)$", line)
+        if not m or m[1] not in exes:
+            continue
+        target = m[3].strip()
+        if m[2].startswith("process-info"):
+            target = re.sub(r"\(\d+\)", "", re.sub(r"^others \[|\]$", "", target))
+        out.append((line[:19], m[2], target))
+    return out
+
+
+def grant_kind(op, target):
+    """这条请求能怎么放行：folder 批准路径，open 允许打开其他软件，clipboard 解除剪贴板禁止。"""
+    if op.startswith("file-") and target.startswith("/"):
+        # 这些是很多软件共用的上层文件夹，放行就等于放出别人的数据
+        lib = Path(HOME, "Library")
+        shared = {"/", "/Users", HOME, "/Applications", "/Volumes", "/private/tmp", "/Users/Shared", str(lib)}
+        p = Path(target)
+        return "" if str(p) in shared or p.parent == lib else "folder"
+    if op in ("lsopen", "appleevent-send"):
+        return "open"
+    return "clipboard" if "pasteboard" in target else ""
+
+
+SUSPICIOUS = ("打听你装了哪些软件", "你的个人文件", "其他软件的数据和系统设置", "家目录里的隐藏配置（如 .ssh、.cache）",
+              "外接硬盘和其他磁盘", "查看其他进程", "打开其他软件", "Checking which apps you have", "Your personal files",
+              "Other apps' data and settings", "Hidden settings in your home folder (like .ssh, .cache)",
+              "External and other disks", "Looking at other processes", "Opening other apps")
+
+
+def trial(app, wait=40):
+    """试运行：按结界的最小权限打开，看它能不能活下来，列出它被拒绝的请求。输出 JSON 给界面用。"""
+    app = str(Path(app).resolve())
+    bundle_id, _ = info(app)
+    stop(app)  # 改了放行后再试，要先关掉上一次的
+    for _ in range(10):
+        if subprocess.run(["launchctl", "print", f"gui/{UID}/{label(bundle_id)}"], capture_output=True).returncode:
+            break
+        subprocess.run(["sleep", "1"])
+    msg = run(app)
+    if msg:
+        return print(json.dumps({"error": msg}, ensure_ascii=False))
+    start = (STATE / f"{bundle_id}.started").read_text().strip()
+    binary = (STATE / f"{bundle_id}.binary").read_text()
+    exited_at = None
+    for _ in range(wait):
+        subprocess.run(["sleep", "1"])
+        if subprocess.run(["pgrep", "-f", "^" + re.escape(binary)], capture_output=True).returncode:
+            exited_at = now()
+            break
+    subprocess.run(["sleep", "2"])  # 等系统日志写完
+    events = denials(app, start)
+    code = re.search(r"last exit code = (\S+)", subprocess.run(
+        ["launchctl", "print", f"gui/{UID}/{label(bundle_id)}"], capture_output=True, text=True).stdout)
+    decisions = settings().get(bundle_id, {}).get("decided", {})
+    seen, items = set(), []
+    for when, op, target in events:
+        key = f"{op} {target}"
+        if key in seen:
+            continue
+        seen.add(key)
+        cat = categorize(op, target, app)
+        items.append({"key": key, "decision": decisions.get(key), "op": op, "target": target, "verb": verb(op), "category": cat, "time": when,
+                      "count": sum(1 for e in events if e[1] == op and e[2] == target),
+                      "suspicious": cat in SUSPICIOUS, "normal": cat in NORMAL, "grant": grant_kind(op, target),
+                      # 退出前几秒内被拒的，最可能是它退出的原因
+                      "suspect": bool(exited_at) and when >= exited_at[:17] + "00" and not cat in NORMAL})
+    blocked(app, quiet=True)
+    print(json.dumps({"alive": exited_at is None, "exitCode": code[1] if code and exited_at else None,
+                      "seconds": wait, "items": items}, ensure_ascii=False))
+
+
+def decide(bundle_id, choice, key):
+    """记下你对一条请求的决定；允许时顺带放行。"""
+    op, target = key.split(" ", 1)
+    if choice == "allow":
+        kind = grant_kind(op, target)
+        if kind == "folder":
+            set_allow(bundle_id, "add", target)
+        elif kind == "open":
+            set_field(bundle_id, "allow_open", True)
+        elif kind == "clipboard":
+            set_block(bundle_id, "clipboard", False)
+    data = settings()
+    data.setdefault(bundle_id, {}).setdefault("decided", {})[key] = choice
+    save_settings(data)
+
+
 def blocked(app, quiet=False):
     """从系统日志里取出结界拦下的请求，并入这个软件的长期记录。"""
     app = str(Path(app).resolve())
@@ -440,23 +549,11 @@ def blocked(app, quiet=False):
     history_file = STATE / f"{bundle_id}-blocked.json"
     history = json.loads(history_file.read_text()) if history_file.exists() else {}
     if start_file.exists():
-        exes = {plistlib.load(open(p, "rb")).get("CFBundleExecutable") for p in Path(app, "Contents").rglob("Info.plist")
-                if p.parent.name == "Contents"}
-        r = subprocess.run(["/usr/bin/log", "show", "--start", start_file.read_text().strip(), "--style", "compact",
-                            "--predicate", 'senderImagePath CONTAINS "Sandbox" AND eventMessage CONTAINS " deny("'],
-                           capture_output=True, text=True, errors="replace")
-        for line in r.stdout.splitlines():
-            m = re.search(r"Sandbox: (.+?)\(\d+\) deny\(\d+\) (\S+) (.*)$", line)
-            if not m or m[1] not in exes:
-                continue
-            target = m[3].strip()
-            if m[2].startswith("process-info"):
-                target = re.sub(r"\(\d+\)", "", re.sub(r"^others \[|\]$", "", target))
-            key = f"{m[2]} {target}"
-            e = history.setdefault(key, {"first": line[:19], "count": 0})
-            e["last"], e["count"] = line[:19], e["count"] + 1
+        for when, op, target in denials(app, start_file.read_text().strip()):
+            e = history.setdefault(f"{op} {target}", {"first": when, "count": 0})
+            e["last"], e["count"] = when, e["count"] + 1
         history_file.write_text(json.dumps(history, ensure_ascii=False, indent=1))
-        start_file.write_text(subprocess.run(["date", "+%Y-%m-%d %H:%M:%S"], capture_output=True, text=True).stdout.strip())
+        start_file.write_text(now())
     groups = {}
     for key, e in history.items():
         op, target = key.split(" ", 1)
@@ -498,7 +595,8 @@ def run(app, learn=False):
     started = STATE / f"{bundle_id}.started"
     if started.exists():
         blocked(original, quiet=True)  # 先把上一次的拦截存进长期记录
-    started.write_text(subprocess.run(["date", "+%Y-%m-%d %H:%M:%S"], capture_output=True, text=True).stdout.strip())
+    started.write_text(now())
+    (STATE / f"{bundle_id}.binary").write_text(binary)
     env = {"TZ": conf["tz"]} if conf.get("tz") else {}
     cwd = "/"
     sb = STATE / f"{bundle_id}.sb"
@@ -583,7 +681,7 @@ def list_apps():
             out.append({"id": bundle_id, "name": app.stem, "path": str(app), "sandboxed": cache[key]["sandboxed"],
                         "perms": [t(PERMISSIONS[k], PERMISSIONS_EN[k]) for k in cache[key]["perm_keys"]], "inside": inside, "running": f"{app}/Contents/MacOS/{exe}" in procs,
                         "tz": c.get("tz"), "mode": effective_mode(bundle_id, c, load_rule(bundle_id)),
-                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c), "location": c.get("location"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "space": str(space), "hasSpace": space.exists()})
+                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c), "location": c.get("location"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "reviewed": bool(c.get("decided")), "space": str(space), "hasSpace": space.exists()})
     STATE.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(cache))
     print(json.dumps(out, ensure_ascii=False))
@@ -609,6 +707,10 @@ def main():
         return set_block(a[1], a[2], a[3] == "on")
     if a[:1] == ["never"] and (a[1:] == ["list"] or (len(a) == 3 and a[1] in ("add", "rm"))):
         return never_cmd(*a[1:])
+    if len(a) >= 4 and a[0] == "decide" and a[2] in ("allow", "deny"):
+        return decide(a[1], a[2], " ".join(a[3:]))
+    if len(a) == 2 and a[0] == "trial":
+        return trial(a[1])
     if len(a) == 2 and a[0] == "blocked":
         return blocked(a[1])
     if len(a) != 2 or a[0] not in ("run", "learn", "report", "stop", "reset"):

@@ -2,6 +2,7 @@
 """结界 Kekkai：让 macOS App 只看得到自己的文件。
 用法:
   kekkai run|trial|learn|stop|report|reset|blocked <App.app>
+  kekkai blocked <App.app> --json
   kekkai list
   kekkai set-tz <bundle id> <时区|->
   kekkai set-mode <bundle id> <space|real>
@@ -14,6 +15,7 @@
   kekkai never list|add|rm [路径]
 """
 import json, os, plistlib, re, shutil, subprocess, sys
+from datetime import datetime
 from pathlib import Path
 
 HOME = str(Path.home())
@@ -418,7 +420,7 @@ def verb(op):
     return t("连", "call") if op == "mach-lookup" else t("看", "view")
 
 
-NORMAL = ("查你的真实用户名", "Looking up your real user name", "连接系统服务", "Connecting to system services",
+NORMAL = ("查看系统分区", "Checking system volumes", "读写自己的安装包", "Its own app bundle", "查你的真实用户名", "Looking up your real user name", "连接系统服务", "Connecting to system services",
           "查看系统进程", "Looking at system processes")
 # 图形软件的系统框架自己会查这些进程【推断，依据是各软件都有这几条】
 SYSTEM_PROCS = {"WindowServer", "initproc", "launchd", "WindowManager", "MenuBarAgent", "Dock", "loginwindow",
@@ -430,8 +432,8 @@ def categorize(op, target, app=""):
     h = HOME + "/"
     if op.startswith("system:"):
         return t("被 macOS 自己拒绝（不是结界）", "Refused by macOS itself (not Kekkai)")
-    if app and target.startswith(app + "/"):
-        return t("改动自己的安装目录", "Changing its own app bundle")
+    if app and (target == app or target.startswith(app + "/")):
+        return t("读写自己的安装包", "Its own app bundle")
     if op.startswith("process-info"):
         if target in SYSTEM_PROCS:
             return t("查看系统进程", "Looking at system processes")
@@ -452,8 +454,14 @@ def categorize(op, target, app=""):
         return t("其他软件的数据和系统设置", "Other apps' data and settings")
     if target.startswith(h + "."):
         return t("家目录里的隐藏配置（如 .ssh、.cache）", "Hidden settings in your home folder (like .ssh, .cache)")
+    if target in ("/Volumes/Recovery", "/Volumes/Preboot", "/Volumes/VM", "/Volumes/Data"):
+        return t("查看系统分区", "Checking system volumes")
     if target.startswith("/Volumes/"):
         return t("外接硬盘和其他磁盘", "External and other disks")
+    if target.startswith((USER_TEMP, USER_CACHE, str(Path(USER_TEMP).parent) + "/")) or target == str(Path(USER_TEMP).parent):
+        return t("其他软件的临时文件和缓存", "Other apps' temporary files and caches")
+    if target in NO_LIST or target.startswith(("/Library/", "/opt/", "/usr/local/")):
+        return t("系统里装了什么", "What's installed on the system")
     if target.startswith(("/private/tmp", "/Users/Shared")):
         return t("共享的临时文件夹", "Shared temporary folders")
     if target.startswith(h) or target == HOME:
@@ -491,15 +499,17 @@ def grant_kind(op, target):
     if op.startswith("file-") and target.startswith("/"):
         # 这些是很多软件共用的上层文件夹，放行就等于放出别人的数据
         lib = Path(HOME, "Library")
-        shared = {"/", "/Users", HOME, "/Applications", "/Volumes", "/private/tmp", "/Users/Shared", str(lib)}
+        shared = {"/", "/Users", HOME, "/Applications", "/Volumes", "/private/tmp", "/Users/Shared", str(lib),
+                  USER_TEMP, USER_CACHE, str(Path(USER_TEMP).parent), *NO_LIST}
         p = Path(target)
-        return "" if str(p) in shared or p.parent == lib else "folder"
+        mixed = str(p).startswith(f"{HOME}/Library/Keychains") or str(p.parent) in (USER_TEMP, USER_CACHE) or p.parent == lib or str(p).startswith(USER_TEMP + "/TemporaryItems")
+        return "" if str(p) in shared or mixed else "folder"
     if op in ("lsopen", "appleevent-send"):
         return "open"
     return "clipboard" if "pasteboard" in target else ""
 
 
-SUSPICIOUS = ("打听你装了哪些软件", "你的个人文件", "其他软件的数据和系统设置", "家目录里的隐藏配置（如 .ssh、.cache）",
+SUSPICIOUS = ("其他软件的临时文件和缓存", "系统里装了什么", "Other apps' temporary files and caches", "What's installed on the system", "打听你装了哪些软件", "你的个人文件", "其他软件的数据和系统设置", "家目录里的隐藏配置（如 .ssh、.cache）",
               "外接硬盘和其他磁盘", "查看其他进程", "打开其他软件", "Checking which apps you have", "Your personal files",
               "Other apps' data and settings", "Hidden settings in your home folder (like .ssh, .cache)",
               "External and other disks", "Looking at other processes", "Opening other apps")
@@ -574,7 +584,14 @@ def decide(bundle_id, choice, key):
     save_settings(data)
 
 
-def blocked(app, quiet=False):
+def job_state(bundle_id):
+    """(是否在运行, 上次退出码)。"""
+    out = subprocess.run(["launchctl", "print", f"gui/{UID}/{label(bundle_id)}"], capture_output=True, text=True).stdout
+    code = re.search(r"last exit (?:code|reason) = (\S+)", out)
+    return "state = running" in out, code[1] if code else None
+
+
+def blocked(app, quiet=False, as_json=False):
     """从系统日志里取出结界拦下的请求，并入这个软件的长期记录。"""
     app = str(Path(app).resolve())
     bundle_id, _ = info(app)
@@ -582,11 +599,14 @@ def blocked(app, quiet=False):
     history_file = STATE / f"{bundle_id}-blocked.json"
     history = json.loads(history_file.read_text()) if history_file.exists() else {}
     if start_file.exists():
+        cursor = now()  # 先记下时间再查，查的过程中新来的下次再取
         for when, op, target in denials(app, start_file.read_text().strip()):
             e = history.setdefault(f"{op} {target}", {"first": when, "count": 0})
             e["last"], e["count"] = when, e["count"] + 1
         history_file.write_text(json.dumps(history, ensure_ascii=False, indent=1))
-        start_file.write_text(now())
+        start_file.write_text(cursor)
+    if as_json:
+        return print(json.dumps(log_status(app, bundle_id, history), ensure_ascii=False))
     groups = {}
     for key, e in history.items():
         op, target = key.split(" ", 1)
@@ -605,6 +625,45 @@ def blocked(app, quiet=False):
     out.write_text("\n".join(lines) + "\n")
     if not quiet:
         print(out)
+
+
+def log_status(app, bundle_id, history):
+    """给界面的拦截记录：这次运行的状态、它自己日志里的报错、每条被拦请求和你的决定。"""
+    running, code = job_state(bundle_id)
+    run_start = (STATE / f"{bundle_id}.run-start").read_text().strip() if (STATE / f"{bundle_id}.run-start").exists() else ""
+    exited_file = STATE / f"{bundle_id}.exited"
+    if run_start and not running and not exited_file.exists():
+        exited_file.write_text(now())  # 界面开着时每几秒查一次，退出时间误差就是这几秒
+    exited = exited_file.read_text().strip() if run_start and not running else ""
+    seconds = None
+    if exited:
+        to = lambda x: datetime.strptime(x[:19], "%Y-%m-%d %H:%M:%S")
+        seconds = int((to(exited) - to(run_start)).total_seconds())
+    errors, log_file, pos_file = [], STATE / f"{bundle_id}.log", STATE / f"{bundle_id}.logpos"
+    if log_file.exists() and pos_file.exists():
+        with open(log_file, errors="replace") as f:
+            f.seek(int(pos_file.read_text() or 0))
+            for ln in f:
+                if re.search(r"EPERM|EACCES|FATAL|Uncaught|Traceback|Exception|operation not permitted", ln, re.I) and len(errors) < 6:
+                    errors.append(ln.strip()[:240])
+    decisions = settings().get(bundle_id, {}).get("decided", {})
+    crashed = seconds is not None and seconds < 60
+    asks = {t("你的个人文件", "Your personal files"), t("家目录里的其他东西", "Other things in your home folder"), t("其他", "Other"),
+            t("外接硬盘和其他磁盘", "External and other disks")}
+    items = []
+    for key, e in history.items():
+        op, target = key.split(" ", 1)
+        cat = categorize(op, target, app)
+        items.append({"key": key, "decision": decisions.get(key), "op": op, "target": target, "verb": verb(op), "category": cat,
+                      "count": e["count"], "last": e["last"], "recent": bool(run_start) and e["last"] >= run_start,
+                      "suspicious": cat in SUSPICIOUS, "normal": cat in NORMAL, "grant": grant_kind(op, target)})
+        r = items[-1]  # 等你决定的：可能真需要的；打听类的不当成需要
+        r["ask"] = bool(r["grant"]) and not r["normal"] and (cat in asks or crashed and r["recent"] and cat == t("其他软件的数据和系统设置", "Other apps' data and settings"))
+    # 从网上下载、没经苹果公证的软件，macOS 的门禁在启动时就拦下（实测 OS_REASON_EXEC）；要不要放行是你的决定
+    quarantined = subprocess.run(["xattr", "-p", "com.apple.quarantine", app], capture_output=True).returncode == 0
+    gatekeeper = bool(exited) and code == "OS_REASON_EXEC" and quarantined
+    return {"running": running, "gatekeeper": gatekeeper, "started": run_start or None, "exited": exited or None, "seconds": seconds,
+            "exitCode": code if exited else None, "errors": errors, "items": items}
 
 
 def isChinese():
@@ -630,7 +689,15 @@ def run(app, learn=False):
     if started.exists():
         blocked(original, quiet=True)  # 先把上一次的拦截存进长期记录
     started.write_text(now())
+    (STATE / f"{bundle_id}.run-start").write_text(started.read_text())
+    (STATE / f"{bundle_id}.exited").unlink(missing_ok=True)
+    log_file = STATE / f"{bundle_id}.log"
+    (STATE / f"{bundle_id}.logpos").write_text(str(log_file.stat().st_size if log_file.exists() else 0))
     (STATE / f"{bundle_id}.binary").write_text(binary)
+    if not original.startswith(("/Applications/", f"{HOME}/Applications/")):
+        data = settings()  # 不在应用程序文件夹里的软件，记下来让它留在列表里
+        data["_apps"] = sorted({*data.get("_apps", []), original})
+        save_settings(data)
     env = {"TZ": conf["tz"]} if conf.get("tz") else {}
     cwd = "/"
     sb = STATE / f"{bundle_id}.sb"
@@ -694,8 +761,9 @@ def list_apps():
     procs = subprocess.run(["ps", "-axo", "comm="], capture_output=True, text=True).stdout
     jobs = subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout
     conf, out = settings(), []
-    for base in ("/Applications", f"{HOME}/Applications"):
-        for app in sorted(Path(base).glob("*.app")):
+    extra = [Path(p) for p in conf.get("_apps", []) if Path(p).exists()]
+    for base in ("/Applications", f"{HOME}/Applications", None):
+        for app in (sorted(Path(base).glob("*.app")) if base else extra):
             try:
                 bundle_id, exe = info(app)
             except (OSError, KeyError, plistlib.InvalidFileException):
@@ -745,6 +813,8 @@ def main():
         return trial(a[1])
     if len(a) == 2 and a[0] == "blocked":
         return blocked(a[1])
+    if len(a) == 3 and a[0] == "blocked" and a[2] == "--json":
+        return blocked(a[1], as_json=True)
     if len(a) != 2 or a[0] not in ("run", "learn", "report", "stop", "reset"):
         sys.exit(__doc__)
     if a[0] == "stop":

@@ -83,6 +83,7 @@ final class Store: ObservableObject {
     @Published var apps: [AppEntry] = []
     @Published var message: String?
     @Published var never: [String] = []
+    @Published var selected: String?
     private var timer: Timer?
 
     init() {
@@ -98,7 +99,10 @@ final class Store: ObservableObject {
                 DispatchQueue.main.async { self.message = r.out }
                 return
             }
-            DispatchQueue.main.async { if self.apps != list { self.apps = list } }
+            DispatchQueue.main.async {
+                if self.apps != list { self.apps = list }
+                if let p = self.reveal, let a = list.first(where: { $0.path == p }) { self.reveal = nil; self.selected = a.id }
+            }
         }
     }
 
@@ -116,31 +120,23 @@ final class Store: ObservableObject {
         if let i = apps.firstIndex(where: { $0.id == id }) { change(&apps[i]) }
     }
 
-    func open(path: String) { perform(["run", path]) }
+    @Published var reveal: String?
+    func open(path: String) {
+        DispatchQueue.global().async {
+            let r = CLI.call(["run", path])
+            DispatchQueue.main.async {
+                if !r.ok { self.message = r.out }
+                self.reveal = path
+                self.refresh()
+            }
+        }
+    }
 
     func loadNever(_ args: [String] = ["never", "list"]) {
         DispatchQueue.global().async {
             let r = CLI.call(args)
             let list = (try? JSONDecoder().decode([String].self, from: Data(r.out.utf8))) ?? []
             DispatchQueue.main.async { if r.ok { self.never = list } else { self.message = r.out } }
-        }
-    }
-
-    func showBlocked(path: String) {
-        DispatchQueue.global().async {
-            let r = CLI.call(["blocked", path])
-            DispatchQueue.main.async {
-                if r.ok { NSWorkspace.shared.open(URL(fileURLWithPath: r.out)) } else { self.message = r.out }
-            }
-        }
-    }
-
-    func showReport(path: String) {
-        DispatchQueue.global().async {
-            let r = CLI.call(["report", path])
-            DispatchQueue.main.async {
-                if r.ok { NSWorkspace.shared.open(URL(fileURLWithPath: r.out)) } else { self.message = t("先用学习模式运行一次，才有访问记录。", "Run the app in Learn Mode first to get an access log.") }
-            }
         }
     }
 }
@@ -167,7 +163,6 @@ struct Detail: View {
     @ObservedObject var store: Store
     let now: Date
     @State private var picking = false
-    @State private var trying = false
 
     var status: (String, Color) {
         if app.inside { return (t("在结界中运行", "Running in Kekkai"), .green) }
@@ -200,9 +195,7 @@ struct Detail: View {
             if app.inside {
                 Button(t("停止", "Stop")) { store.perform(["stop", app.path]) }.controlSize(.large)
             } else {
-                Button(app.reviewed ? t("在结界中打开", "Open in Kekkai") : t("试运行并打开", "Try and Open")) {
-                    if app.reviewed { store.open(path: app.path) } else { trying = true }
-                }
+                Button(t("在结界中打开", "Open in Kekkai")) { store.open(path: app.path) }
                     .buttonStyle(.borderedProminent).controlSize(.large)
                     .keyboardShortcut(.defaultAction).disabled(app.running)
             }
@@ -243,6 +236,8 @@ struct Detail: View {
                         .foregroundStyle(.secondary)
                 }
 
+                BlockLogSection(app: app, store: store)
+
                 Section {
                     Toggle(t("允许打开其他 App 和链接", "Allow opening other apps and links"), isOn: Binding(
                         get: { app.allowOpen },
@@ -281,19 +276,8 @@ struct Detail: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Section {
-                    HStack {
-                        Button(t("拦截记录", "Block Log")) { store.showBlocked(path: app.path) }
-                        Button(t("试运行…", "Trial Run…")) { trying = true }.disabled(app.running && !app.inside)
-                        Spacer()
-                    }
-                } header: { Text(t("记录", "Logs")) } footer: {
-                    Text(t("试运行：以最小权限运行，列出被拒请求。拦截记录：历次被拒请求。", "Trial Run lists what was denied at minimal access. Block Log collects denials across launches."))
-                        .foregroundStyle(.secondary)
-                }
             }
             .formStyle(.grouped)
-            .sheet(isPresented: $trying) { TrialSheet(app: app, store: store) }
             .sheet(isPresented: $picking) {
                 LocationPicker(current: app.location) { place in
                     store.update(app.id) { $0.location = place }
@@ -304,125 +288,142 @@ struct Detail: View {
     }
 }
 
-struct TrialItem: Codable, Identifiable {
+struct LogItem: Codable, Identifiable {
     var id: String { key }
-    let key, op, target, verb, category, time, grant: String
+    let key, op, target, verb, category, last, grant: String
     let count: Int
-    let suspicious, normal, suspect: Bool
+    let recent, suspicious, normal: Bool
+    var ask: Bool? = nil
     var decision: String?
 }
 
-struct TrialResult: Codable {
-    var errors: [String]? = nil
-    var systemDenied: Bool? = nil
-    let alive: Bool?
-    let exitCode: String?
+struct BlockLog: Codable {
+    let running: Bool
+    var gatekeeper: Bool? = nil
+    let started, exited, exitCode: String?
     let seconds: Int?
-    let items: [TrialItem]?
-    let error: String?
+    let errors: [String]
+    var items: [LogItem]
 }
 
-struct TrialSheet: View {
+/// 拦截记录：在结界中运行时每几秒刷新，每条可以直接允许或拒绝
+struct BlockLogSection: View {
     let app: AppEntry
     @ObservedObject var store: Store
-    @Environment(\.dismiss) private var dismiss
-    @State private var result: TrialResult?
-    @State private var showNormal = false
+    @State private var log: BlockLog?
+    @State private var changed = false
 
-    func start() {
-        result = nil
-        DispatchQueue.global().async {
-            let r = CLI.call(["trial", app.path])
-            let decoded = try? JSONDecoder().decode(TrialResult.self, from: Data(r.out.utf8))
-            DispatchQueue.main.async { result = decoded ?? TrialResult(alive: nil, exitCode: nil, seconds: nil, items: nil, error: r.out) }
-        }
+    func load() async {
+        let r = await Task.detached { CLI.call(["blocked", app.path, "--json"]) }.value
+        if let l = try? JSONDecoder().decode(BlockLog.self, from: Data(r.out.utf8)) { log = l }
     }
-    func decide(_ item: TrialItem, _ choice: String) {
-        if let i = result?.items?.firstIndex(where: { $0.key == item.key }) {
-            var items = result!.items!
-            items[i].decision = choice
-            result = TrialResult(errors: result!.errors, systemDenied: result!.systemDenied, alive: result!.alive, exitCode: result!.exitCode, seconds: result!.seconds, items: items, error: nil)
-        }
+    func decide(_ item: LogItem, _ choice: String) {
+        if let i = log?.items.firstIndex(where: { $0.key == item.key }) { log?.items[i].decision = choice }
+        if choice == "allow" { changed = true }
         store.perform(["decide", app.id, choice, item.key])
     }
-
-    func row(_ item: TrialItem) -> some View {
+    func row(_ item: LogItem) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(item.verb).foregroundStyle(.secondary)
-                    Text((item.target as NSString).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.middle)
+                    Text((item.target as NSString).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.middle).help(item.target)
                 }
                 HStack(spacing: 6) {
-                    Text(item.category).font(.caption).foregroundStyle(.secondary)
-                    if item.suspect { Text(t("疑似退出原因", "Likely cause")).font(.caption.weight(.semibold)).foregroundStyle(.orange) }
-                    else if item.suspicious { Text(t("可疑", "Suspicious")).font(.caption.weight(.semibold)).foregroundStyle(.red) }
-                }
+                    Text(item.category).foregroundStyle(.secondary)
+                    if item.count > 1 { Text("×\(item.count)").foregroundStyle(.secondary) }
+                    if item.suspicious { Text(t("可疑", "Suspicious")).fontWeight(.semibold).foregroundStyle(.red) }
+                    if item.recent { Text(t("本次", "This launch")).foregroundStyle(.blue) }
+                }.font(.caption)
             }
             Spacer()
             if let d = item.decision {
                 Text(d == "allow" ? t("已允许", "Allowed") : t("已拒绝", "Denied")).foregroundStyle(.secondary)
-            } else {
+            } else if !item.grant.isEmpty {
                 Button(t("拒绝", "Deny")) { decide(item, "deny") }
-                Button(t("允许", "Allow")) { decide(item, "allow") }.disabled(item.grant.isEmpty)
-                    .help(item.grant.isEmpty ? t("不可放行", "Can't be allowed") : "")
+                Button(t("允许", "Allow")) { decide(item, "allow") }
             }
         }
-        .padding(.vertical, 2)
+    }
+    func order(_ items: [LogItem]) -> [LogItem] {
+        items.sorted { ($0.recent ? 0 : 1, $0.suspicious ? 0 : 1, -$0.count) < ($1.recent ? 0 : 1, $1.suspicious ? 0 : 1, -$1.count) }
+    }
+    /// 等你决定的：可能真需要的（你的文件夹、闪退前被挡的数据），打听类的折进分组
+    var pending: [LogItem] { order((log?.items ?? []).filter { $0.ask == true && $0.decision == nil }) }
+    /// 其余按类别折叠：可疑的在前，系统常规的在最后
+    var groups: [(String, [LogItem])] {
+        let rest = (log?.items ?? []).filter { !pending.map(\.key).contains($0.key) }
+        return Dictionary(grouping: rest, by: \.category).map { ($0.key, order($0.value)) }.sorted {
+            let a = ($0.1[0].normal ? 1 : 0, $0.1[0].suspicious ? 0 : 1, -$0.1.count), b = ($1.1[0].normal ? 1 : 0, $1.1[0].suspicious ? 0 : 1, -$1.1.count)
+            return a < b
+        }
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(t("试运行 \(displayName(app))", "Trial run: \(displayName(app))")).font(.title3.weight(.semibold))
-            if let r = result {
-                if let e = r.error, !e.isEmpty {
-                    Text(e).foregroundStyle(.red)
-                } else {
-                    let items = r.items ?? []
-                    let main = items.filter { !$0.normal }, normal = items.filter { $0.normal }
-                    let troubled = r.alive == true && (!(r.errors ?? []).isEmpty || r.systemDenied == true)
-                    if troubled {
-                        Label(t("仍在运行，但出现错误。", "Still running, but errors occurred."), systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-                        ForEach(r.errors ?? [], id: \.self) { Text($0).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2) }
-                    } else {
-                    Label(r.alive == true
-                          ? t("以最小权限正常运行 \(r.seconds ?? 40) 秒。", "Ran normally for \(r.seconds ?? 40) s with minimal access.")
-                          : t("已退出，退出码 \(r.exitCode ?? "?")。", "Quit with exit code \(r.exitCode ?? "?")."),
-                          systemImage: r.alive == true ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(r.alive == true ? .green : .orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                    }
-                    List {
-                        if main.isEmpty { Text(t("无被拒请求", "No denied requests")).foregroundStyle(.secondary) }
-                        ForEach(main.sorted { ($0.suspect ? 0 : 1, $0.decision == nil ? 0 : 1) < ($1.suspect ? 0 : 1, $1.decision == nil ? 0 : 1) }) { row($0) }
-                        if !normal.isEmpty {
-                            DisclosureGroup(t("系统常规请求（\(normal.count)）", "Routine system requests (\(normal.count))"), isExpanded: $showNormal) {
-                                ForEach(normal) { row($0) }
-                            }
+        Section {
+            if let l = log {
+                if l.gatekeeper == true {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(t("macOS 不让它运行：它从网上下载，且没有经过苹果公证。", "macOS won't run it: it was downloaded and isn't notarized by Apple."),
+                              systemImage: "lock.shield").foregroundStyle(.orange)
+                        Text(t("确认来源可信，到“隐私与安全性”底部点“仍要打开”，再回到这里打开。", "If you trust it, click Open Anyway at the bottom of Privacy & Security, then open it here again."))
+                            .foregroundStyle(.secondary)
+                        Button(t("打开隐私与安全性", "Open Privacy & Security")) {
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension")!)
                         }
                     }
-                    .frame(minHeight: 280)
+                } else if let s = l.seconds, s < 60, l.exited != nil {
+                    Label(t("打开 \(s) 秒后就退出了（\(l.exitCode ?? "?")）。放行它需要的请求，再打开试试。",
+                            "Quit \(s) s after opening (\(l.exitCode ?? "?")). Allow what it needs, then open it again."),
+                          systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                }
+                if !l.errors.isEmpty {
+                    DisclosureGroup(t("它自己的日志里有报错（\(l.errors.count)）", "Errors in its own log (\(l.errors.count))")) {
+                        ForEach(l.errors, id: \.self) { Text($0).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2) }
+                    }
+                }
+                if changed && app.inside {
+                    HStack {
+                        Text(t("已放行的请求重新打开后生效。", "Allowed requests take effect after reopening.")).foregroundStyle(.secondary)
+                        Spacer()
+                        Button(t("重新打开", "Reopen")) {
+                            changed = false
+                            store.perform(["stop", app.path])
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { store.open(path: app.path) }
+                        }
+                    }
+                }
+                if l.items.isEmpty { Text(t("暂无拦截", "Nothing blocked yet")).foregroundStyle(.secondary) }
+                ForEach(pending) { row($0) }
+                ForEach(groups, id: \.0) { cat, items in
+                    DisclosureGroup {
+                        ForEach(items) { row($0) }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(cat)
+                            Text("\(items.count)").foregroundStyle(.secondary)
+                            if items[0].suspicious { Text(t("可疑", "Suspicious")).font(.caption.weight(.semibold)).foregroundStyle(.red) }
+                            if items[0].normal { Text(t("多数软件都会", "Most apps do this")).font(.caption).foregroundStyle(.secondary) }
+                            if items.contains(where: \.recent) { Text(t("本次", "This launch")).font(.caption).foregroundStyle(.blue) }
+                        }
+                    }
                 }
             } else {
-                HStack(spacing: 10) {
-                    ProgressView().controlSize(.small)
-                    Text(t("正在以最小权限运行，约 40 秒…", "Running with minimal access, about 40 s…")).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, minHeight: 280)
+                ProgressView().controlSize(.small)
             }
-            HStack {
-                if let items = result?.items, items.contains(where: { $0.decision == nil && !$0.normal }) {
-                    Button(t("其余全部拒绝", "Deny the Rest")) { items.filter { $0.decision == nil && !$0.normal }.forEach { decide($0, "deny") } }
-                }
-                Spacer()
-                Button(t("再试一次", "Try Again"), action: start).disabled(result == nil)
-                Button(t("完成", "Done")) { dismiss() }.keyboardShortcut(.defaultAction)
-            }
+        } header: { Text(t("拦截记录", "Block Log")) } footer: {
+            Text(app.inside ? t("运行中，实时更新。上面是它可能需要的，其余一直挡着，展开分组也能放行。", "Running. Updates live. What it may need is listed first; everything else stays blocked, and you can still allow items inside each group.") : t("在结界中打开后，它被拦下的请求会出现在这里。", "Requests it makes that Kekkai blocks show up here once you open it."))
+                .foregroundStyle(.secondary)
         }
-        .padding(20)
-        .frame(width: 640, height: 520)
-        .onAppear(perform: start)
+        .task(id: "\(app.id) \(app.inside)") {
+            changed = false
+            await load()
+            while app.inside && !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(4))
+                await load()
+            }
+            await load()  // 刚退出时再取一次，记下退出状态
+        }
     }
 }
 
@@ -591,6 +592,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showNever) { NeverSheet(store: store) }
         .onReceive(tick) { now = $0 }
+        .onReceive(store.$selected) { if let id = $0 { selection = id } }
         .alert(t("结界", "Kekkai"), isPresented: Binding(get: { store.message != nil }, set: { if !$0 { store.message = nil } })) {
             Button(t("好", "OK"), role: .cancel) {}
         } message: { Text(store.message ?? "") }

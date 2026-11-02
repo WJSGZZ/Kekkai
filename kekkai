@@ -304,9 +304,10 @@ def build_profile(app, bundle_id, rule, conf, mode, groups=()):
               "(allow file-read-metadata", *[f"  (literal {q(p)})" for p in parents], ")",
               "(allow file-read* file-write*", *["  " + o for o in own], *["  " + x for x in extra],
               *[f"  (subpath {q(p)})" for p in approved], *["  " + s for s in system], ")",
-              f"(allow file-read* (literal {q(HOME + '/.CFUserTextEncoding')})",
-              f"  (subpath {q(HOME + '/Library/Input Methods')}) (subpath {q(HOME + '/Library/Keyboard Layouts')}))",
+              f"(allow file-read* (literal {q(HOME + '/.CFUserTextEncoding')}))",
               f"(allow file-read-metadata (subpath {q(HOME + '/Library/Keychains')}))"]
+    # 输入法和键盘布局，打字要用
+    L.append(f"(allow file-read* (subpath {q(HOME + '/Library/Input Methods')}) (subpath {q(HOME + '/Library/Keyboard Layouts')}))")
     # 模拟区域里没有旧数据，有的软件发现空的旧数据目录就要授权，让这一步看到“目录不存在”
     hide = [f"  (literal {q(os.path.join(space_of(bundle_id), x))})" for x in rule.get("space_hide_stat", []) if mode == "space"]
     if hide:
@@ -391,6 +392,7 @@ def local_copy(app, bundle_id):
 
 
 def verb(op):
+    op = op.removeprefix("system:")
     if op.startswith("file-write"):
         return t("写", "write")
     if op == "file-read-metadata":
@@ -410,6 +412,8 @@ SYSTEM_PROCS = {"WindowServer", "initproc", "launchd", "WindowManager", "MenuBar
 def categorize(op, target, app=""):
     """把一条拦截归到人能看懂的类别。"""
     h = HOME + "/"
+    if op.startswith("system:"):
+        return t("被 macOS 自己拒绝（不是结界）", "Refused by macOS itself (not Kekkai)")
     if app and target.startswith(app + "/"):
         return t("改动自己的安装目录", "Changing its own app bundle")
     if op.startswith("process-info"):
@@ -424,7 +428,7 @@ def categorize(op, target, app=""):
         if "pasteboard" in target:
             return t("读写剪贴板", "Using the clipboard")
         return t("连接系统服务", "Connecting to system services")
-    if target.startswith(("/Applications/", "/System/Applications/", h + "Applications/")):
+    if target in ("/Applications", h + "Applications") or target.startswith(("/Applications/", "/System/Applications/", h + "Applications/")):
         return t("打听你装了哪些软件", "Checking which apps you have")
     if target.startswith(tuple(h + d for d in ("Desktop", "Documents", "Downloads", "Pictures", "Movies", "Music", "Library/Mobile Documents"))):
         return t("你的个人文件", "Your personal files")
@@ -454,18 +458,20 @@ def denials(app, start):
                        capture_output=True, text=True, errors="replace")
     out = []
     for line in r.stdout.splitlines():
-        m = re.search(r"Sandbox: (.+?)\(\d+\) deny\(\d+\) (\S+) (.*)$", line)
-        if not m or m[1] not in exes:
+        m = re.search(r"(Sandbox|System Policy): (.+?)\(\d+\) deny\(\d+\) (\S+) (.*)$", line)
+        if not m or m[2] not in exes:
             continue
-        target = m[3].strip()
-        if m[2].startswith("process-info"):
+        op, target = ("system:" if m[1] == "System Policy" else "") + m[3], m[4].strip()
+        if op.startswith("process-info"):
             target = re.sub(r"\(\d+\)", "", re.sub(r"^others \[|\]$", "", target))
-        out.append((line[:19], m[2], target))
+        out.append((line[:19], op, target))
     return out
 
 
 def grant_kind(op, target):
     """这条请求能怎么放行：folder 批准路径，open 允许打开其他软件，clipboard 解除剪贴板禁止。"""
+    if op.startswith("system:"):
+        return ""
     if op.startswith("file-") and target.startswith("/"):
         # 这些是很多软件共用的上层文件夹，放行就等于放出别人的数据
         lib = Path(HOME, "Library")
@@ -497,6 +503,8 @@ def trial(app, wait=40):
         return print(json.dumps({"error": msg}, ensure_ascii=False))
     start = (STATE / f"{bundle_id}.started").read_text().strip()
     binary = (STATE / f"{bundle_id}.binary").read_text()
+    log_file = STATE / f"{bundle_id}.log"
+    log_from = log_file.stat().st_size if log_file.exists() else 0
     exited_at = None
     for _ in range(wait):
         subprocess.run(["sleep", "1"])
@@ -519,9 +527,18 @@ def trial(app, wait=40):
                       "count": sum(1 for e in events if e[1] == op and e[2] == target),
                       "suspicious": cat in SUSPICIOUS, "normal": cat in NORMAL, "grant": grant_kind(op, target),
                       # 退出前几秒内被拒的，最可能是它退出的原因
-                      "suspect": bool(exited_at) and when >= exited_at[:17] + "00" and not cat in NORMAL})
+                      "suspect": op.startswith("system:") or bool(exited_at) and when >= exited_at[:17] + "00" and not cat in NORMAL})
     blocked(app, quiet=True)
-    print(json.dumps({"alive": exited_at is None, "exitCode": code[1] if code and exited_at else None,
+    # 软件还活着不代表正常，它可能弹了报错；把它自己日志里的报错也带上
+    errors = []
+    if log_file.exists():
+        with open(log_file, errors="replace") as f:
+            f.seek(log_from)
+            for ln in f:
+                if re.search(r"EPERM|EACCES|FATAL|Uncaught|Traceback|Exception|operation not permitted", ln, re.I) and len(errors) < 6:
+                    errors.append(ln.strip()[:240])
+    system_denied = any(i["op"].startswith("system:") for i in items)
+    print(json.dumps({"errors": errors, "systemDenied": system_denied, "alive": exited_at is None, "exitCode": code[1] if code and exited_at else None,
                       "seconds": wait, "items": items}, ensure_ascii=False))
 
 
@@ -590,7 +607,8 @@ def run(app, learn=False):
     binary = f"{app}/Contents/MacOS/{exe}"
     if subprocess.run(["pgrep", "-f", "^" + re.escape(binary)], capture_output=True).returncode == 0:
         return t(f"{Path(app).stem} 已在运行。请先完全退出，再放进结界。", f"{Path(app).stem} is already running. Quit it completely first.")
-    mode = effective_mode(bundle_id, conf, rule)
+    # 苹果的“系统策略”只许原签名的软件进它的容器，重签的副本进不去，只能用自己的一份数据（实测 EPERM）
+    mode = "space" if sandboxed else effective_mode(bundle_id, conf, rule)
     STATE.mkdir(parents=True, exist_ok=True)
     started = STATE / f"{bundle_id}.started"
     if started.exists():
@@ -613,12 +631,6 @@ def run(app, learn=False):
             env.update(HOME=space, CFFIXED_USER_HOME=space, TMPDIR=space + "/tmp/")
             if not rule.get("keep_prefs_service"):
                 env["__CFPREFERENCES_AVOID_DAEMON"] = "1"  # 偏好设置直接读写模拟区域，不经系统服务
-        elif sandboxed:
-            # 副本没有苹果沙盒，让它把原来的容器当家目录，读写的就是原来那份数据
-            home = Path(HOME, "Library/Containers", bundle_id, "Data")
-            (home / "Library/Preferences").mkdir(parents=True, exist_ok=True)
-            cwd = str(home)
-            env.update(HOME=cwd, CFFIXED_USER_HOME=cwd, __CFPREFERENCES_AVOID_DAEMON="1")
         if not rule.get("keep_username"):
             env.update(USER="user", LOGNAME="user")
     if fake:

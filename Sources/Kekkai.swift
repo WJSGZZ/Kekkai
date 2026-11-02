@@ -313,6 +313,8 @@ struct TrialItem: Codable, Identifiable {
 }
 
 struct TrialResult: Codable {
+    var errors: [String]? = nil
+    var systemDenied: Bool? = nil
     let alive: Bool?
     let exitCode: String?
     let seconds: Int?
@@ -339,7 +341,7 @@ struct TrialSheet: View {
         if let i = result?.items?.firstIndex(where: { $0.key == item.key }) {
             var items = result!.items!
             items[i].decision = choice
-            result = TrialResult(alive: result!.alive, exitCode: result!.exitCode, seconds: result!.seconds, items: items, error: nil)
+            result = TrialResult(errors: result!.errors, systemDenied: result!.systemDenied, alive: result!.alive, exitCode: result!.exitCode, seconds: result!.seconds, items: items, error: nil)
         }
         store.perform(["decide", app.id, choice, item.key])
     }
@@ -378,12 +380,19 @@ struct TrialSheet: View {
                 } else {
                     let items = r.items ?? []
                     let main = items.filter { !$0.normal }, normal = items.filter { $0.normal }
+                    let troubled = r.alive == true && (!(r.errors ?? []).isEmpty || r.systemDenied == true)
+                    if troubled {
+                        Label(t("它还开着，但出了错，可能没法正常用。看下面的报错和标橙色的请求。", "It's still open but hit errors, so it may not work properly. See the errors and the requests marked in orange."), systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                        ForEach(r.errors ?? [], id: \.self) { Text($0).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2) }
+                    } else {
                     Label(r.alive == true
                           ? t("在最小权限下正常运行了 \(r.seconds ?? 40) 秒。下面这些被拒绝了也没影响，可以放心拒绝。", "It ran normally for \(r.seconds ?? 40) seconds with minimal access. Denying the requests below didn't stop it, so it's safe to deny them.")
                           : t("它中途退出了（退出码 \(r.exitCode ?? "?")）。看看标着“可能是它退出的原因”的那几条，允许后再试一次。", "It quit (exit code \(r.exitCode ?? "?")). Check the requests marked “May be why it quit”, allow what makes sense, then try again."),
                           systemImage: r.alive == true ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                         .foregroundStyle(r.alive == true ? .green : .orange)
                         .fixedSize(horizontal: false, vertical: true)
+                    }
                     List {
                         if main.isEmpty { Text(t("没有被拒绝的请求。", "No requests were denied.")).foregroundStyle(.secondary) }
                         ForEach(main.sorted { ($0.suspect ? 0 : 1, $0.decision == nil ? 0 : 1) < ($1.suspect ? 0 : 1, $1.decision == nil ? 0 : 1) }) { row($0) }

@@ -274,17 +274,26 @@ struct Detail: View {
                 BlockLogSection(app: app, store: store)
 
                 Section {
-                    Toggle(t("允许打开其他 App 和链接", "Allow opening other apps and links"), isOn: Binding(
+                    Toggle(t("剪贴板与拖放", "Clipboard and drag and drop"), isOn: Binding(
+                        get: { !app.block.contains("clipboard") },
+                        set: { v in set(["set-block", app.id, "clipboard", v ? "off" : "on"]) { e in
+                            e.block = e.block.filter { $0 != "clipboard" } + (v ? [] : ["clipboard"]) } }))
+                    Toggle(t("钥匙串", "Keychain"), isOn: Binding(
+                        get: { !(app.options?["keychain"] ?? false) },
+                        set: { v in set(["set", app.id, "keychain", v ? "off" : "on"]) { $0.options?["keychain"] = !v } }))
+                    option("username", t("真实用户名", "Real user name"))
+                    option("procinfo", t("其他进程信息", "Other processes"))
+                    option("localhost", t("本机端口", "Ports on this Mac"))
+                    Toggle(t("打开其他 App 与链接", "Opening other apps and links"), isOn: Binding(
                         get: { app.allowOpen },
                         set: { v in set(["set-open", app.id, v ? "on" : "off"]) { $0.allowOpen = v } }))
-                    option("localhost", t("允许连接本机其他程序的端口", "Allow connecting to other programs' ports on this Mac"))
-                    option("procinfo", t("允许获取其他程序的运行信息", "Allow inspecting other running programs"))
-                    option("username", t("显示你的真实用户名", "Show your real user name"))
-                    option("keychain", t("禁止使用钥匙串", "Block the keychain"))
-                    Toggle(t("禁止剪贴板和拖放", "Block clipboard and drag and drop"), isOn: Binding(
-                        get: { app.block.contains("clipboard") },
-                        set: { v in set(["set-block", app.id, "clipboard", v ? "on" : "off"]) { e in
-                            e.block = e.block.filter { $0 != "clipboard" } + (v ? ["clipboard"] : []) } }))
+                } header: { Text(t("权限", "Permissions")) } footer: {
+                    Text(t("打开即允许。“本机端口”指本机上其他程序开的网络服务，如代理面板、开发服务器。允许打开其他 App 后，被打开的 App 不在结界内。下次打开生效。",
+                           "On means allowed. Ports on this Mac are network services opened by other programs here, such as proxy dashboards and dev servers. Apps it opens run outside Kekkai. Changes apply next launch."))
+                        .foregroundStyle(.secondary)
+                }
+
+                Section {
                     Picker(t("时区", "Time zone"), selection: Binding(
                         get: { app.tz ?? "" },
                         set: { v in set(["set-tz", app.id, v.isEmpty ? "-" : v]) { $0.tz = v.isEmpty ? nil : v } })) {
@@ -299,8 +308,8 @@ struct Detail: View {
                             Button(t("选择…", "Choose…")) { picking = true }
                         }
                     }
-                } header: { Text(t("隔离", "Isolation")) } footer: {
-                    Text(t("默认全部关闭，最严。打开其他 App 可能绕过结界；禁用钥匙串后，依赖它的登录可能失效。结界内时间 \(clock(app.tz))。下次打开生效。", "All off by default, the strictest setting. Opening other apps can bypass Kekkai, and blocking the keychain may break sign-ins that rely on it. Time inside: \(clock(app.tz)). Changes apply next launch."))
+                } header: { Text(t("伪装", "Disguise")) } footer: {
+                    Text(t("结界内时间 \(clock(app.tz))。下次打开生效。", "Time inside: \(clock(app.tz)). Changes apply next launch."))
                         .foregroundStyle(.secondary)
                 }
 
@@ -311,9 +320,9 @@ struct Detail: View {
                         Button(t("定位", "Location")) { openPrivacy("Privacy_LocationServices") }
                         Button(t("本地网络", "Local Network")) { openPrivacy("Privacy_LocalNetwork") }
                     }
-                } header: { Text(t("系统权限", "System permissions")) } footer: {
-                    Text(t("由 macOS 按 App 管理。访问局域网设备的权限在“隐私与安全性 › 本地网络”里关闭；本机上其他程序的端口由结界拦截。",
-                           "Managed by macOS for each app. Turn off access to devices on your network under Privacy & Security › Local Network; Kekkai blocks ports opened by other programs on this Mac."))
+                } header: { Text(t("由 macOS 管理的权限", "Permissions managed by macOS")) } footer: {
+                    Text(t("在系统设置里按 App 开关。本地网络在“隐私与安全性”页的列表里，控制它能否访问局域网设备。",
+                           "Set per app in System Settings. Local Network, listed on the Privacy & Security page, controls access to devices on your network."))
                         .foregroundStyle(.secondary)
                 }
 

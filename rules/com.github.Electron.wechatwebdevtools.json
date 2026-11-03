@@ -1,4 +1,3 @@
 {
- "allow_localhost": true,
- "block_keychain": false
+ "allow_localhost": true
 }

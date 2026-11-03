@@ -68,7 +68,7 @@ Apps with the hardened runtime and library validation can't be injected, and rel
 | **Local ports** | A private block of 32 ports; the sandbox allows only those. Ports the app opens are moved into the block, so its own parts still connect | Only its own block, which excludes the ports it opens itself; turn on Ports on this Mac when needed |
 | **Clipboard** | Three modes. Default *Write, read on paste*: contents are readable only within 1.5 s of ⌘V or Paste | Off by default, drag and drop included |
 | **Processes** | Every other process is *no such process*; the process table lists only the app | Process info and the process table are blocked |
-| **Keychain** | One per app, inside its Kekkai folder, with a random password unlocked at launch. Your keychain can't be read or listed | Same |
+| **Keychain** | One per app, inside its Kekkai folder, with a random password unlocked at launch. Your keychain can't be read or listed, and there is no option to open it. Apps that run in place get no keychain access | Same |
 | **Also** | No launching other apps or sending Apple events; per-app time zone; virtual location (CoreLocation, with GCJ-02 handled) | Same; virtual location switches to an injectable clone |
 
 macOS itself redacts the Wi-Fi name and BSSID for apps without location permission.
@@ -117,7 +117,7 @@ kekkai add|remove <App.app>                       add (with trial run) / remove
 kekkai run|stop|blocked <App.app>                 launch / stop / export the Block Log
 kekkai list                                       all apps and settings as JSON
 kekkai allow <id> add|rm <folder>                 approve a folder
-kekkai set <id> localhost|procinfo|keychain|clone on|off
+kekkai set <id> localhost|procinfo|clone on|off
 kekkai set-clipboard <id> off|paste|on
 kekkai set-open <id> on|off                       allow opening other apps and links
 kekkai set-tz <id> <time zone|->

@@ -34,6 +34,7 @@
 - 已核实的系统事实：macOS 上 `gethostuuid` 不经沙盒检查（XNU 里 `#if !defined(XNU_TARGET_OS_OSX)`），所以要靠注入改；SBPL 的 `(deny iokit-get-properties (iokit-property ...))` 有效；`network-bind`／`network-outbound` 能按单个端口放行，但端口写不了 0，也写不了范围；只按 `localhost` 限制，连本机局域网地址不算 localhost。
 - **更多设备信息**：`DEVICE_IDS`（磁盘、分区、电池、蓝牙、芯片、触控板、键盘、显示器的序列号和 UUID）能注入时沙盒放行、`inject.c` 的 `morph()` 按种子换成同格式的值（同一原值在一个软件里总换成同一个）；不能注入时沙盒按属性名挡。开机时间、`kern.bootsessionuuid`、磁盘服务、显示器序列号和 UUID（`CGDisplayCreateUUIDFromDisplayID`）也一样处理（显示器的两项走窗口服务，不能注入时挡不住）。
 - **网络位置**：路由表里带 `RTF_LLINFO` 的条目（ARP、IPv6 邻居）由注入库删掉；`arp`、`ndp`、`netstat`、`ipconfig`、`system_profiler` 在 `NO_EXEC` 里。Wi-Fi 名称和 BSSID 系统本身对没有定位权限的程序打码（实测 `<redacted>`）。不能注入的软件由沙盒挡 sysctl 名 `net.routetable.<协议>.<0|30>.<1|2|7>.*`（全部协议和 IPv6 的整表导出）；不能整组挡 `net.route`，网卡列表（操作码 3、6）同时供 `getifaddrs` 用，挡了就断网。IPv4 的 ARP 条目系统本就不给普通程序（实测 `arp -an` 有条目，普通进程用 sysctl 读到 0 条）。
+- **钥匙串**：始终用结界文件夹里的独立钥匙串（`private_keychain()`），不提供改用用户钥匙串的选项，用户钥匙串在结界文件夹之外；原地运行的软件整个挡住钥匙串服务。实测沙盒内对 `login.keychain-db` 列证书得 0 条（沙盒外 5 条）。
 - **剪贴板三档**：`clipboard_mode()`：off 挡剪贴板服务；paste（能注入时默认）由注入库钩 NSPasteboard 的读内容方法，⌘V 或“粘贴”菜单后 1.5 秒内放行，`types` 照答以免菜单变灰，拖放板不管；on 全放。
 - **进程**：“其他进程信息”关闭时，沙盒另挡 `kern.proc.all` 等 sysctl（只挡 process-info 实测能被它绕过）；能注入的由注入库把别人答成 ESRCH、列表只给自己，不能注入的连 `kern.proc.pid` 也挡。
 - 注入库要先写新文件再替换，原地覆盖已签名的库会让加载它的软件被系统以 `OS_REASON_CODESIGNING` 杀掉。

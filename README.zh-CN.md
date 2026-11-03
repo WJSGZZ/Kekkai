@@ -70,7 +70,7 @@ flowchart LR
 | **本⁠机⁠端⁠口** | 每个软件一组 32 个专用端口，沙盒只许连这组；它自己开的端口由注入库挪进这组，自身组件照常互连 | 只能连自己那组，自己开的端口也连不上，需要时打开“本机端口” |
 | **剪⁠贴⁠板** | 三档，默认“可写入，粘贴时可读”：按 ⌘V 或点“粘贴”后 1.5 秒内才读得到内容 | 默认整个挡掉，拖放一起 |
 | **进⁠程** | 别的进程一律“没有这个进程”，进程表只有自己 | 进程信息和进程表都挡掉 |
-| **钥⁠匙⁠串** | 每个软件一份，放在自己的结界文件夹，密码随机、启动前自动解锁；你的钥匙串读不到也列不出 | 同左 |
+| **钥⁠匙⁠串** | 每个软件一份，放在自己的结界文件夹，密码随机、启动前自动解锁；你的钥匙串无法读取或列出，也不提供开放选项。原地运行的软件不能使用钥匙串 | 同左 |
 | **其⁠他** | 不许拉起别的软件、不许发自动化指令；独立时区；虚拟位置（替换 CoreLocation，自动处理 GCJ-02） | 同左；虚拟位置会改用可注入的副本 |
 
 Wi-Fi 名称和 BSSID 由系统对没有定位权限的程序打码，两类软件都读不到。
@@ -119,7 +119,7 @@ kekkai add|remove <App.app>                       添加（含试运行）／移
 kekkai run|stop|blocked <App.app>                 启动／停止／导出拦截记录
 kekkai list                                       所有软件及设置（JSON）
 kekkai allow <id> add|rm <文件夹>                 批准文件夹
-kekkai set <id> localhost|procinfo|keychain|clone on|off
+kekkai set <id> localhost|procinfo|clone on|off
 kekkai set-clipboard <id> off|paste|on
 kekkai set-open <id> on|off                       允许打开其他软件和链接
 kekkai set-tz <id> <时区|->

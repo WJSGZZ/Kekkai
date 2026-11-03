@@ -370,9 +370,6 @@ struct Detail: View {
                         if app.injectable ?? false { Text(t("可写入，粘贴时可读", "Write, read on paste")).tag("paste") }
                         Text(t("允许", "On")).tag("on")
                     }
-                    Toggle(t("你的钥匙串", "Your keychain"), isOn: Binding(
-                        get: { !(app.options?["keychain"] ?? false) },
-                        set: { v in set(["set", app.id, "keychain", v ? "off" : "on"]) { $0.options?["keychain"] = !v } }))
                     option("procinfo", t("其他进程信息", "Other processes"))
                     option("localhost", t("本机端口", "Ports on this Mac"))
                     Toggle(t("打开其他 App 与链接", "Opening other apps and links"), isOn: Binding(
@@ -384,8 +381,8 @@ struct Detail: View {
                         Text(t("添加时自动开启：\(auto.joined(separator: "、"))（关闭后无法启动）。", "Turned on automatically at first launch: \(auto.joined(separator: ", ")). It failed to start without them."))
                             .foregroundStyle(.orange)
                     }
-                    Text(t("开启即允许，默认全部关闭，更改在下次打开时生效。剪贴板“粘贴时可读”：软件可随时写入，只有按 ⌘V 或点“粘贴”时才能读取内容。“你的钥匙串”关闭时使用结界文件夹内的独立钥匙串，首次需重新登录。“本机端口”指本机其他程序提供的网络服务，如代理面板、开发服务器；关闭时只能连结界分配给它的一组端口，可注入的软件自己开的端口会移入这组，自身各部分照常互连。经它打开的其他 App 不受结界限制。",
-                           "On means allowed; everything is off by default. With the clipboard set to Write, read on paste, the app can copy anytime but reads the clipboard only when you press ⌘V or choose Paste. With Your keychain off, the app gets its own keychain in its Kekkai folder, so sign-ins are still remembered after you sign in once. Ports on this Mac are network services opened by other programs here, such as proxy dashboards and dev servers. With it off, the app reaches only a set of ports Kekkai assigns it; when Kekkai can inject into the app, ports it opens itself are moved into that set, so its own parts still connect. Apps it opens run outside Kekkai. Changes apply next launch."))
+                    Text(t("开启即允许。默认全部关闭，更改在下次打开时生效。剪贴板设为“可写入，粘贴时可读”时，软件可随时写入，仅在按下 ⌘V 或选择“粘贴”后可读取。“本机端口”指本机其他程序提供的网络服务，如代理面板和开发服务器；关闭时仅可连接结界为其分配的端口，可注入的软件自行打开的端口将移入该范围。经它打开的其他 App 不受结界限制。",
+                           "On means allowed. Everything is off by default; changes take effect next launch. With the clipboard set to Write, read on paste, the app can write at any time and read only after you press ⌘V or choose Paste. Ports on this Mac are network services provided by other programs, such as proxy dashboards and development servers. When off, the app can connect only to the ports Kekkai assigns it; for injectable apps, ports the app opens itself are moved into that range. Apps it opens run outside Kekkai."))
                         .foregroundStyle(.secondary)
                 }
 

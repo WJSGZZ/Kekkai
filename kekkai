@@ -13,7 +13,7 @@
   kekkai set-block <bundle id> clipboard <on|off>
   kekkai set-clipboard <bundle id> off|paste|on
   kekkai set-open <bundle id> <on|off>
-  kekkai set <bundle id> localhost|procinfo|keychain|clone <on|off>
+  kekkai set <bundle id> localhost|procinfo|clone <on|off>
   kekkai allow <bundle id> add|rm <文件夹>
   kekkai decide <bundle id> allow|deny <操作> <对象>
   kekkai set-location <bundle id> <WGS-84 纬度> <经度> [名称] | -
@@ -176,10 +176,10 @@ def set_field(bundle_id, key, value):
 
 
 # 隔离开关：界面里的名字 → 设置里的键。没设置时用规则文件的默认，再没有就是最严
-OPTIONS = {"localhost": "allow_localhost", "procinfo": "allow_procinfo", "keychain": "block_keychain", "clone": "clone"}
+OPTIONS = {"localhost": "allow_localhost", "procinfo": "allow_procinfo", "clone": "clone"}
 
 
-OPTION_DEFAULTS = {"block_keychain": True}  # 默认全部最严
+OPTION_DEFAULTS = {}  # 默认全部最严
 
 
 def opt(rule, conf, key):
@@ -323,20 +323,15 @@ def seed_space(app, bundle_id, rule, container=False):
         import_container(bundle_id) if container else import_own(app, bundle_id, rule)
 
 
-def private_keychain(bundle_id, real=False):
+def private_keychain(bundle_id):
     """结界文件夹里它自己的钥匙串：它存的登录凭据留在这里，读不到你的钥匙串。
     家目录换到结界文件夹后，系统按新家目录里的偏好找钥匙串（实测），所以只改它自己的那份设置。
-    文件不能叫 login.keychain-db，系统会特殊对待、解不开锁（实测）。real=True 时改指向你真实的钥匙串。"""
+    文件不能叫 login.keychain-db，系统会特殊对待、解不开锁（实测）。你的钥匙串在结界文件夹之外，不提供放开的选项。"""
     space = space_of(bundle_id)
     kc = space / "Library/Keychains/kekkai.keychain-db"
     pw_file = STATE / f"{bundle_id}.keychain"
     env = {**os.environ, "HOME": str(space), "CFFIXED_USER_HOME": str(space), "__CFPREFERENCES_AVOID_DAEMON": "1"}
     sec = lambda *a: subprocess.run(["/usr/bin/security", *a], env=env, capture_output=True, text=True)
-    if real:
-        login = f"{HOME}/Library/Keychains/login.keychain-db"
-        sec("list-keychains", "-d", "user", "-s", login)
-        sec("default-keychain", "-d", "user", "-s", login)
-        return
     if not kc.exists() or not pw_file.exists():
         kc.unlink(missing_ok=True)
         if kc.parent.is_symlink():
@@ -430,8 +425,8 @@ def common_rules(rule, conf, mode="space"):
         start, count = conf.get("ports", (0, 0))
         L += [";; 不许连本机上其他程序的网络端口，只许连分给它的端口", '(deny network-outbound (remote ip "localhost:*"))',
               *[f'(allow network-outbound (remote ip "localhost:{p}"))' for p in [*proxy_ports(), *range(start, start + count)]]]
-    if opt(rule, conf, "block_keychain") and mode != "space":
-        # 原地运行的软件家目录就是你的，没法给它单独的钥匙串，只能整个挡住
+    if mode != "space":
+        # 你的钥匙串在结界文件夹之外，不开放。原地运行的软件家目录就是你的，没法给它单独的钥匙串，只能整个挡住
         L += [";; 挡住钥匙串，代价是依赖钥匙串的登录会失效",
               '(deny mach-lookup (global-name "com.apple.securityd.xpc") (global-name "com.apple.SecurityServer") (global-name "com.apple.secd.keychain"))']
     for d in blocked_devices(conf, conf.get("inject")):
@@ -541,9 +536,6 @@ def build_profile(app, bundle_id, rule, conf, mode, groups=()):
               *[f"(allow file-read-data (literal {q(str(Path(p).parent))}))" for p in approved],
               f"(allow file-read* (literal {q(HOME + '/.CFUserTextEncoding')}))",
               f"(allow file-read-metadata (subpath {q(HOME + '/Library/Keychains')}))"]
-    if not opt(rule, conf, "block_keychain"):
-        # 钥匙串文件藏起来系统会以为钥匙串丢了（实测弹“找不到钥匙串”）；读里面的密码仍要过系统自己的授权
-        L.append(f"(allow file-read* file-write* (subpath {q(HOME + '/Library/Keychains')}))")
     # 输入法和键盘布局，打字要用
     L.append(f"(allow file-read* (subpath {q(HOME + '/Library/Input Methods')}) (subpath {q(HOME + '/Library/Keyboard Layouts')}))")
     # 模拟区域里没有旧数据，有的软件发现空的旧数据目录就要授权，让这一步看到“目录不存在”
@@ -1011,7 +1003,7 @@ def run(app, learn=False):
             env.update(HOME=space, CFFIXED_USER_HOME=space, TMPDIR=space + "/tmp/", MAC_CHROMIUM_TMPDIR=space + "/tmp/")
             if not rule.get("keep_prefs_service"):
                 env["__CFPREFERENCES_AVOID_DAEMON"] = "1"  # 偏好设置直接读写模拟区域，不经系统服务
-                private_keychain(bundle_id, real=not opt(rule, conf, "block_keychain"))
+                private_keychain(bundle_id)
         if not opt(rule, conf, "keep_username"):
             env.update(USER="user", LOGNAME="user")
     if not learn and not rule.get("shared_tmp") and mode != "space":

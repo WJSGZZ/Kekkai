@@ -5,6 +5,8 @@
 // 端口：它开的 TCP 端口挪进结界分给它的那组，沙盒只许它连这组，所以连得上自己的、连不上别人的。
 // 剪贴板：可以写；读内容只在你按 ⌘V 或点“粘贴”后的一会儿放行。
 // 进程：别的程序一律“没有这个进程”，列表里只有它自己，像一台什么都没开的 Mac。
+// 局域网：连不上局域网里的设备，也搜不到 Bonjour 服务；DNS 和系统代理照常。
+// 语言：首选语言和地区换成常见的组合（如简体中文、中国），不留第二语言。
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <SystemConfiguration/SystemConfiguration.h>
@@ -31,7 +33,10 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/socket.h>
+#include <dns_sd.h>
+#include <Network/Network.h>
 
 #define INTERPOSE(mine, theirs) \
     __attribute__((used)) static struct { const void *a, *b; } _i_##theirs \
@@ -39,11 +44,12 @@
 
 static const char *carry[] = {"HOME", "DYLD_INSERT_LIBRARIES", "KEKKAI_HOME", "KEKKAI_LAT", "KEKKAI_LON",
                               "KEKKAI_SERIAL", "KEKKAI_UUID", "KEKKAI_NAME", "KEKKAI_SEED",
-                              "KEKKAI_PORTS", "KEKKAI_PORTMAP", "KEKKAI_PASTE", "KEKKAI_PROCS", NULL};
+                              "KEKKAI_PORTS", "KEKKAI_PORTMAP", "KEKKAI_PASTE", "KEKKAI_PROCS",
+                              "KEKKAI_NOLAN", "KEKKAI_LANG", "KEKKAI_LOCALE", NULL};
 static char *saved[sizeof carry / sizeof *carry];  // 启动时记下的 "名字=值"
 static char *home, *serial, *uuid, *name, *seed, *portmap;
 static int pstart, pcount;  // 分给它的端口：pstart 起 pcount 个
-static int hide_procs;
+static int hide_procs, no_lan;
 static struct passwd fake;
 
 // ---- 剪贴板 ----
@@ -136,6 +142,9 @@ static void guard_clipboard(void) {
 
 static void hide_apps(void);
 
+static void find_proxies(void);
+static void set_language(const char *lang, const char *locale);
+
 __attribute__((constructor)) static void setup(void) {
     for (int i = 0; carry[i]; i++) {
         const char *v = getenv(carry[i]);
@@ -154,6 +163,8 @@ __attribute__((constructor)) static void setup(void) {
     if (getenv("KEKKAI_PASTE")) guard_clipboard();
     hide_procs = getenv("KEKKAI_PROCS") != NULL;
     if (hide_procs) hide_apps();
+    if ((no_lan = getenv("KEKKAI_NOLAN") != NULL)) find_proxies();
+    if (getenv("KEKKAI_LANG") && getenv("KEKKAI_LOCALE")) set_language(getenv("KEKKAI_LANG"), getenv("KEKKAI_LOCALE"));
     const char *h = getenv("KEKKAI_HOME");
     if (!h) return;
     home = strdup(h);
@@ -318,7 +329,7 @@ static int my_bind(int fd, const struct sockaddr *addr, socklen_t len) {
     return -1;
 }
 
-static int my_connect(int fd, const struct sockaddr *addr, socklen_t len) {
+static int to_port(int fd, const struct sockaddr *addr, socklen_t len) {
     int to;
     if (!pcount || !inet(addr, len) || !loopback(addr) || ours(port_of(addr)) || !(to = mapped(port_of(addr))))
         return connect(fd, addr, len);
@@ -329,6 +340,129 @@ static int my_connect(int fd, const struct sockaddr *addr, socklen_t len) {
 }
 
 INTERPOSE(my_bind, bind)
+
+// ---- 局域网 ----
+
+static struct sockaddr_storage proxies[8];  // 系统代理设在局域网里时照常放行
+static int nproxies;
+
+static int private4(uint32_t a) {
+    return (a >> 24) == 10 || (a >> 20) == 0xAC1 || (a >> 16) == 0xC0A8 || (a >> 16) == 0xA9FE ||
+           (a >> 28) == 0xE || a == 0xFFFFFFFF;  // 私有、链路本地、组播、广播
+}
+
+static int same_host(const struct sockaddr *a, const struct sockaddr *b) {
+    if (a->sa_family != b->sa_family || port_of(a) != port_of(b)) return 0;
+    if (a->sa_family == AF_INET)
+        return ((struct sockaddr_in *)a)->sin_addr.s_addr == ((struct sockaddr_in *)b)->sin_addr.s_addr;
+    return !memcmp(&((struct sockaddr_in6 *)a)->sin6_addr, &((struct sockaddr_in6 *)b)->sin6_addr, 16);
+}
+
+static int lan(const struct sockaddr *a, socklen_t len) {
+    if (!no_lan || !inet(a, len) || port_of(a) == 53) return 0;
+    int hit;
+    if (a->sa_family == AF_INET) hit = private4(ntohl(((struct sockaddr_in *)a)->sin_addr.s_addr));
+    else {
+        const struct in6_addr *x = &((struct sockaddr_in6 *)a)->sin6_addr;
+        hit = IN6_IS_ADDR_LINKLOCAL(x) || IN6_IS_ADDR_MULTICAST(x) || (x->s6_addr[0] & 0xFE) == 0xFC ||
+              (IN6_IS_ADDR_V4MAPPED(x) && private4(ntohl(*(uint32_t *)&x->s6_addr[12])));
+    }
+    for (int i = 0; hit && i < nproxies; i++)
+        if (same_host(a, (struct sockaddr *)&proxies[i])) hit = 0;
+    return hit;
+}
+
+static void find_proxies(void) {
+    CFDictionaryRef d = SCDynamicStoreCopyProxies(NULL);
+    if (!d) return;
+    CFStringRef keys[][2] = {{kSCPropNetProxiesHTTPProxy, kSCPropNetProxiesHTTPPort},
+                             {kSCPropNetProxiesHTTPSProxy, kSCPropNetProxiesHTTPSPort},
+                             {kSCPropNetProxiesSOCKSProxy, kSCPropNetProxiesSOCKSPort}};
+    for (int i = 0; i < 3 && nproxies < 8; i++) {
+        CFStringRef host = CFDictionaryGetValue(d, keys[i][0]);
+        CFNumberRef port = CFDictionaryGetValue(d, keys[i][1]);
+        char h[64];
+        int p = 0;
+        if (!host || CFGetTypeID(host) != CFStringGetTypeID() || !CFStringGetCString(host, h, sizeof h, kCFStringEncodingUTF8) ||
+            !port || CFGetTypeID(port) != CFNumberGetTypeID() || !CFNumberGetValue(port, kCFNumberIntType, &p))
+            continue;
+        struct sockaddr_storage *s = &proxies[nproxies];
+        struct sockaddr_in *v4 = (struct sockaddr_in *)s;
+        struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)s;
+        if (inet_pton(AF_INET, h, &v4->sin_addr) == 1) v4->sin_family = AF_INET, v4->sin_port = htons(p), nproxies++;
+        else if (inet_pton(AF_INET6, h, &v6->sin6_addr) == 1) v6->sin6_family = AF_INET6, v6->sin6_port = htons(p), nproxies++;
+    }
+    CFRelease(d);
+}
+
+static int my_connect(int fd, const struct sockaddr *addr, socklen_t len) {
+    if (lan(addr, len)) return errno = EHOSTUNREACH, -1;
+    return to_port(fd, addr, len);
+}
+
+static int my_connectx(int fd, const sa_endpoints_t *ep, sae_associd_t aid, unsigned int flags, const struct iovec *iov,
+                       unsigned int iovcnt, size_t *len, sae_connid_t *cid) {
+    if (ep && lan(ep->sae_dstaddr, ep->sae_dstaddrlen)) return errno = EHOSTUNREACH, -1;
+    return connectx(fd, ep, aid, flags, iov, iovcnt, len, cid);
+}
+
+static ssize_t my_sendto(int fd, const void *buf, size_t n, int flags, const struct sockaddr *to, socklen_t len) {
+    if (to && lan(to, len)) return errno = EHOSTUNREACH, -1;
+    return sendto(fd, buf, n, flags, to, len);
+}
+
+static ssize_t my_sendmsg(int fd, const struct msghdr *m, int flags) {
+    if (m && m->msg_name && lan(m->msg_name, m->msg_namelen)) return errno = EHOSTUNREACH, -1;
+    return sendmsg(fd, m, flags);
+}
+
+// Bonjour：NSNetServiceBrowser 等经过这几个函数
+static DNSServiceErrorType my_DNSServiceBrowse(DNSServiceRef *r, DNSServiceFlags f, uint32_t i, const char *type,
+                                               const char *domain, DNSServiceBrowseReply cb, void *ctx) {
+    return no_lan ? kDNSServiceErr_PolicyDenied : DNSServiceBrowse(r, f, i, type, domain, cb, ctx);
+}
+
+static DNSServiceErrorType my_DNSServiceResolve(DNSServiceRef *r, DNSServiceFlags f, uint32_t i, const char *name,
+                                                const char *type, const char *domain, DNSServiceResolveReply cb, void *ctx) {
+    return no_lan ? kDNSServiceErr_PolicyDenied : DNSServiceResolve(r, f, i, name, type, domain, cb, ctx);
+}
+
+static DNSServiceErrorType my_DNSServiceRegister(DNSServiceRef *r, DNSServiceFlags f, uint32_t i, const char *name,
+                                                 const char *type, const char *domain, const char *host, uint16_t port,
+                                                 uint16_t txtlen, const void *txt, DNSServiceRegisterReply cb, void *ctx) {
+    return no_lan ? kDNSServiceErr_PolicyDenied
+                  : DNSServiceRegister(r, f, i, name, type, domain, host, port, txtlen, txt, cb, ctx);
+}
+
+// Network 框架的浏览器不经上面几个函数，直接取消，软件收到“已取消”
+static void my_nw_browser_start(nw_browser_t b) {
+    if (no_lan) nw_browser_cancel(b);
+    else nw_browser_start(b);
+}
+
+INTERPOSE(my_nw_browser_start, nw_browser_start)
+INTERPOSE(my_connectx, connectx)
+INTERPOSE(my_sendto, sendto)
+INTERPOSE(my_sendmsg, sendmsg)
+INTERPOSE(my_DNSServiceBrowse, DNSServiceBrowse)
+INTERPOSE(my_DNSServiceResolve, DNSServiceResolve)
+INTERPOSE(my_DNSServiceRegister, DNSServiceRegister)
+
+// ---- 语言 ----
+
+// 只改本进程的偏好设置：结界文件夹里偏好设置不经系统服务，不会写进真实的偏好设置。软件自己选过语言的不动
+static void set_language(const char *lang, const char *locale) {
+    CFPropertyListRef own = CFPreferencesCopyValue(CFSTR("AppleLanguages"), kCFPreferencesCurrentApplication,
+                                                   kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    if (own) return CFRelease(own);
+    CFStringRef l = CFStringCreateWithCString(NULL, lang, kCFStringEncodingUTF8);
+    CFStringRef r = CFStringCreateWithCString(NULL, locale, kCFStringEncodingUTF8);
+    CFArrayRef a = CFArrayCreate(NULL, (const void **)&l, 1, &kCFTypeArrayCallBacks);
+    CFPreferencesSetAppValue(CFSTR("AppleLanguages"), a, kCFPreferencesCurrentApplication);
+    CFPreferencesSetAppValue(CFSTR("AppleLocale"), r, kCFPreferencesCurrentApplication);
+    CFRelease(a), CFRelease(l), CFRelease(r);
+}
+
 INTERPOSE(my_connect, connect)
 
 // ---- 进程 ----

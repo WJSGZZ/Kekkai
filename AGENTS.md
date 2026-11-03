@@ -44,6 +44,9 @@
 - **带隔离标记的软件不用副本**：`quarantined()`；临时签名副本被门禁拒绝（实测 `ASP: Security policy would not allow process`，退出原因 OS_REASON_EXEC），不绕过门禁，所以 `add()` 不先试副本、`run()` 忽略 `clone`、界面不显示副本开关。
 - **腾讯会议官网版实测（2026-11-03，3.47.2）**：清空旧数据后以结界文件夹模式能启动，不写真实资料库；但它通过 LaunchServices 查到 App Store 版（沙盒内查询软件 ID 能得到 VooV，未读其文件），每次启动都要求授权读取 App Store 版数据。不能注入、带隔离标记，结界无法隐藏这次查询。用户选择只留 App Store 版，官网版已移除；是否保持登录未测，规则仍为 `real`。系统的打开面板会把 `NSOSPLastRootDirectory` 写进真实的偏好设置。
 - **剪贴板三档**：`clipboard_mode()`：off 挡剪贴板服务；paste（能注入时默认）由注入库钩 NSPasteboard 的读内容方法，⌘V 或“粘贴”菜单后 1.5 秒内放行，`types` 照答以免菜单变灰，拖放板不管；on 全放。
+- **局域网**：“局域网设备”（`allow_lan`）关闭且能注入时设 `KEKKAI_NOLAN`，注入库让 `connect`／`connectx`／`sendto`／`sendmsg` 发往私有、链路本地、组播和广播地址的返回 EHOSTUNREACH（端口 53 和系统代理地址除外），`DNSServiceBrowse`／`Resolve`／`Register` 返回 PolicyDenied，`nw_browser_start` 改为取消（Network 框架的浏览器不经 dns_sd 函数，实测）。SBPL 的网络过滤写不了网段，不能注入的软件只能靠 macOS 的“本地网络”权限，结界不改系统设置。
+- **语言与时区**：`common_language()` 取系统首选语言的第一项，换成该语言最常见的地区（`COMMON_REGION`），注入库在启动时 `CFPreferencesSetAppValue` 写 `AppleLanguages`／`AppleLocale`，软件域里已有 `AppleLanguages` 的不动。只在设了 `__CFPREFERENCES_AVOID_DAEMON` 时传：实测该变量下偏好设置的写入在沙盒内不落盘；不设时同样的调用会经 cfprefsd 写进真实的 `~/Library/Preferences/<id>.plist`。时区：设置里没选时，`app_zone()` 换成该地区里今后两年钟点完全相同的时区（`same_clock()`），设了 `keep_identity` 的不换。设置里 `tz` 为 `location` 时按虚拟位置查时区：`zone_at()` 读 CoreLocation 自带的 `timezone.db`（SQLite，R 树外框加多边形），点在多边形内即取该时区，海上按经度取 `Etc/GMT±N`；实测乌鲁木齐、拉萨得 Asia/Shanghai，香港得 Asia/Hong_Kong。没设虚拟位置时按自动处理。
+- **偏好设置的实际去向（实测，待真实软件核对）**：`__CFPREFERENCES_AVOID_DAEMON` 下 CoreFoundation 按用户数据库里的家目录找偏好文件，不看 `CFFIXED_USER_HOME`；沙盒内查用户数据库被挡，测试程序写的值不落盘，结界文件夹的 `Library/Preferences` 也没有新文件。真实软件是否每次启动都丢失自己的偏好设置尚未核对。
 - **进程**：“其他进程信息”关闭时，沙盒另挡 `kern.proc.all` 等 sysctl（只挡 process-info 实测能被它绕过）；能注入的由注入库把别人答成 ESRCH、列表只给自己，不能注入的连 `kern.proc.pid` 也挡。
 - 注入库要先写新文件再替换，原地覆盖已签名的库会让加载它的软件被系统以 `OS_REASON_CODESIGNING` 杀掉。
 - 拦截记录按各 `Contents/MacOS` 里的文件名认进程，不读 `CFBundleExecutable`（微信开发者工具的 Helper 不写这一项）。
@@ -79,6 +82,7 @@
 - 百度网盘、微信开发者工具、QQ、微信、腾讯会议两个版本的结果见 README 实测表。
 - 端口配额：微信开发者工具在“本机端口”关闭时编译正常，它开的端口全部挪进配额，系统日志没有网络拒绝。
 - 设备信息、邻居条目、剪贴板、进程的注入与沙盒规则用测试程序逐项验证；百度网盘、腾讯会议 VooV、微信、开发者工具带上新规则都能正常运行（这几个这次都以可注入方式运行，“不能注入”那条路只有测试程序验证过）。剪贴板在真实软件里按 ⌘V 的效果未实测。IPv6 邻居表规则用测试程序（getifaddrs、IPv4/IPv6 联网正常）和 Obsidian（不能注入）验证过。
+- 局域网屏蔽与语言统一（2026-11-03）：测试程序验证直连、URLSession、dns_sd、NSNetServiceBrowser、NWBrowser 均被拦，公网连接正常；VooV、微信开发者工具带新规则正常运行（开发者工具编译正常，端口仍在配额内），VooV 进程环境里语言为 zh-Hans-CN、时区 Asia/Shanghai。QQ、微信、百度网盘未重新运行。
 - 添加流程：不能运行的软件（如要求 App Store 收据的）会被拒绝并清理，能运行的正常加入。
 - 假用户、假设备在注入后生效；App 能自行安装 support 文件；设置和关于窗口正常。
 - 安装映像里存的布局已读回核对（图标大小、背景、位置、无工具栏和标签栏）。

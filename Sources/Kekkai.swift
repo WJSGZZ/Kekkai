@@ -57,6 +57,8 @@ struct AppEntry: Codable, Identifiable, Equatable {
     let sandboxed, inside, running, hasSpace: Bool
     var bringOld: Bool
     var tz: String?
+    var zone: String? = nil  // 实际时区：设置里选的，或结界换成的同钟点时区
+    var language: String? = nil
     let perms: [String]
     var block: [String]
     var location: Place?
@@ -263,6 +265,9 @@ struct Detail: View {
         f.timeZone = tz.flatMap(TimeZone.init(identifier:)) ?? .current
         return f.string(from: now)
     }
+    var languageName: String? {
+        app.language.flatMap { Locale.current.localizedString(forIdentifier: $0) }
+    }
     func set(_ args: [String], _ change: @escaping (inout AppEntry) -> Void) {
         store.update(app.id, change)
         store.perform(args)
@@ -383,6 +388,9 @@ struct Detail: View {
                     }
                     option("procinfo", t("其他进程信息", "Other processes"))
                     option("localhost", t("本机端口", "Ports on this Mac"))
+                    if app.injectable ?? false {
+                        option("lan", t("局域网设备", "Devices on the local network"))
+                    }
                     Toggle(t("打开其他 App 与链接", "Opening other apps and links"), isOn: Binding(
                         get: { app.allowOpen },
                         set: { v in set(["set-open", app.id, v ? "on" : "off"]) { $0.allowOpen = v } }))
@@ -400,9 +408,18 @@ struct Detail: View {
                     Picker(t("时区", "Time zone"), selection: Binding(
                         get: { app.tz ?? "" },
                         set: { v in set(["set-tz", app.id, v.isEmpty ? "-" : v]) { $0.tz = v.isEmpty ? nil : v } })) {
-                        Text(t("跟随系统", "System default")).tag("")
+                        if let zone = app.zone, app.tz == nil {
+                            Text(t("自动（\(zone)）", "Automatic (\(zone))")).tag("")
+                        } else {
+                            Text(t("跟随系统", "System default")).tag("")
+                        }
+                        if app.location != nil || app.tz == "location" {
+                            Text(app.tz == "location" && app.location != nil
+                                 ? t("跟随虚拟位置（\(app.zone ?? "")）", "Match virtual location (\(app.zone ?? ""))")
+                                 : t("跟随虚拟位置", "Match virtual location")).tag("location")
+                        }
                         ForEach(presetZones, id: \.1) { Text($0.0).tag($0.1) }
-                        if let tz = app.tz, !presetZones.contains(where: { $0.1 == tz }) { Text(tz).tag(tz) }
+                        if let tz = app.tz, tz != "location", !presetZones.contains(where: { $0.1 == tz }) { Text(tz).tag(tz) }
                     }
                     LabeledContent(t("虚拟位置", "Virtual location")) {
                         HStack {
@@ -427,7 +444,7 @@ struct Detail: View {
                         Text(t("该软件的签名不允许注入，设备信息仅能屏蔽。开启后运行可注入的副本，系统权限需重新授权。", "This app's signature doesn't allow injection, so device information can only be blocked. When on, Kekkai runs an injectable copy; system permissions must be granted again."))
                             .foregroundStyle(.secondary)
                     }
-                    Text(t("结界内时间：\(clock(app.tz))。序列号、硬件 UUID、网卡地址和电脑名为该软件专用，各软件互不相同。", "Time inside: \(clock(app.tz)). The serial number, hardware UUID, network addresses and computer name are unique to this app."))
+                    Text(t("结界内时间：\(clock(app.zone ?? app.tz))\(languageName.map { "，语言：" + $0 } ?? "")。序列号、硬件 UUID、网卡地址和电脑名为该软件专用，各软件互不相同。", "Time inside: \(clock(app.zone ?? app.tz))\(languageName.map { ". Language: " + $0 } ?? ""). The serial number, hardware UUID, network addresses and computer name are unique to this app."))
                         .foregroundStyle(.secondary)
                 }
                 .confirmationDialog(t("重置设备身份？", "Reset device identity?"), isPresented: $renewing) {
@@ -1223,6 +1240,8 @@ let helpSections: [(String, [String])] = isChinese ? [
         "设备信息：序列号、硬件 UUID、网卡地址等替换为该 App 专用的值，各 App 之间互不相同。",
         "其他程序：无法查看其他进程、运行中的软件和窗口，无法用聚焦搜索列出已装软件，无法连接本机其他程序提供的端口，无法打开其他 App。",
         "剪贴板：默认可随时写入，仅在按下 ⌘V 或选择“粘贴”后可读取。",
+        "局域网：可注入的 App 无法连接局域网中的设备，也无法发现 Bonjour 服务；DNS 和系统代理不受影响。不可注入的 App 由 macOS 的“本地网络”权限控制，建议在“系统设置 › 隐私与安全性 › 本地网络”中保持关闭。",
+        "语言与地区：可注入的 App 看到的首选语言仅保留一种，地区为该语言最常见的地区，如简体中文对应中国。未单独设置时区时，系统时区换为该地区中钟点完全相同的时区，如台北换为上海。",
     ]),
     ("数据与登录", [
         "首次打开时，结界将原 App 的数据复制到该 App 的结界文件夹，此后两者相互独立，原数据保持不变。如需更新，可在“数据”一栏重新导入。",
@@ -1232,6 +1251,7 @@ let helpSections: [(String, [String])] = isChinese ? [
     ("权限", [
         "设置中的权限默认全部关闭，开启即允许，更改在下次打开 App 时生效。",
         "本机端口：指本机其他程序提供的网络服务，如代理面板和开发服务器。关闭时仅可连接结界为其分配的端口；可注入的 App 自行打开的端口将移入该范围。",
+        "局域网设备：开启后可连接局域网中的设备并使用 Bonjour，如投屏和局域网传输。",
         "打开其他 App 与链接：开启后，经它打开的 App 和网页不受结界限制。",
         "拦截记录分三档：越权为超出其功能所需的探查；留意为可能正常但值得关注的请求；常规为系统框架自动发出的请求，不影响使用。",
         "App 功能异常时，请先查看拦截记录。排在前面且标有“本次运行”的项目最可能相关，可逐项放行。",
@@ -1245,7 +1265,7 @@ let helpSections: [(String, [String])] = isChinese ? [
         "原地运行：少数 App（如腾讯会议官网版）以书签记录数据位置，只能在原位置运行，此时主目录路径中的账户名对其可见。",
         "电脑名：不可注入的 App 可读取真实电脑名。如电脑名包含本人姓名，建议在“系统设置 › 通用 › 关于本机”中修改。",
         "重置设备身份：该 App 将把本机识别为新设备，账号可能需要重新验证；App 自行保存的设备标识需清除数据后失效。机型、系统版本等非唯一信息保持不变。",
-        "时区：可按 App 单独设置。使用代理的 App，建议将时区设为代理出口所在地区；两者不一致时更易被识别。",
+        "时区：可按 App 单独设置。使用代理的 App，建议将时区设为代理出口所在地区；两者不一致时更易被识别。设置虚拟位置后可选“跟随虚拟位置”，时区按该位置确定，查询使用 macOS 自带的时区边界数据，不联网；未设置虚拟位置时按“自动”处理。",
     ]),
     ("隐私", [
         "结界本身不联网。仅当在虚拟位置中选择“在地图上选择”时加载 Apple 地图。",
@@ -1262,6 +1282,8 @@ let helpSections: [(String, [String])] = isChinese ? [
         "Device information: the serial number, hardware UUID, network addresses and similar values are replaced with values unique to the app.",
         "Other programs: the app can't see other processes, running apps or their windows, list installed apps through Spotlight, connect to ports opened by other programs on this Mac, or open other apps.",
         "Clipboard: by default the app can write at any time and read only after you press ⌘V or choose Paste.",
+        "Local network: injectable apps can't connect to devices on the local network or discover Bonjour services. DNS and the system proxy are unaffected. Apps that can't be injected are governed by the macOS Local Network permission; keep it off in System Settings › Privacy & Security › Local Network.",
+        "Language and region: injectable apps see a single preferred language, with the region most common for it, such as China for Simplified Chinese. Unless a time zone is set for the app, the system time zone is replaced with one in that region that keeps exactly the same clock, such as Shanghai for Taipei.",
     ]),
     ("Data and Sign-In", [
         "At first launch, Kekkai copies the original app's data into the app's Kekkai folder. The two are independent after that, and the original data is unchanged. To update it, import again from the Data section.",
@@ -1271,6 +1293,7 @@ let helpSections: [(String, [String])] = isChinese ? [
     ("Permissions", [
         "All permissions in Settings are off by default. Turning one on allows it; changes take effect the next time the app opens.",
         "Ports on this Mac: network services provided by other programs, such as proxy dashboards and development servers. When off, the app can connect only to the ports Kekkai assigns it; for injectable apps, ports the app opens itself are moved into that range.",
+        "Devices on the local network: when on, the app can connect to devices on the local network and use Bonjour, for screen mirroring or local file transfer, for example.",
         "Opening other apps and links: when on, apps and web pages it opens run outside Kekkai.",
         "The Block Log has three levels: Overreach is probing beyond what the app needs; Worth a look may be normal but deserves attention; Routine is sent automatically by system frameworks and is harmless to block.",
         "If the app doesn't work as expected, check the Block Log first. Items near the top marked This Run are the most likely cause and can be allowed individually.",
@@ -1284,7 +1307,7 @@ let helpSections: [(String, [String])] = isChinese ? [
         "Running in place: a few apps, such as Tencent Meeting's direct download, record their data location in bookmarks and must run in place. Your account name in the home folder path is then visible to them.",
         "Computer name: apps that can't be injected can read the real computer name. If it contains your name, change it in System Settings › General › About.",
         "Reset device identity: the app treats this Mac as a new device, and accounts may ask for verification again. Device IDs the app saved itself remain until its data is cleared. Non-unique details such as model and macOS version are unchanged.",
-        "Time zone: set per app. For an app that uses a proxy, set the time zone to the proxy's region; a mismatch makes identification easier.",
+        "Time zone: set per app. For an app that uses a proxy, set the time zone to the proxy's region; a mismatch makes identification easier. With a virtual location set, choose Match Virtual Location to use that location's time zone. The lookup uses time zone boundary data included with macOS and works offline; without a virtual location, Automatic applies.",
     ]),
     ("Privacy", [
         "Kekkai doesn't connect to the internet. Apple Maps loads only when you click Choose on a Map in the virtual-location picker.",

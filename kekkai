@@ -7,13 +7,13 @@
   kekkai tune <App.app>
   kekkai launcher <App.app> [名称]
   kekkai list
-  kekkai set-tz <bundle id> <时区|->
+  kekkai set-tz <bundle id> <时区|location|->
   kekkai set-mode <bundle id> <space|real>
   kekkai set-bring-old <bundle id> <on|off>
   kekkai set-block <bundle id> clipboard <on|off>
   kekkai set-clipboard <bundle id> off|paste|on
   kekkai set-open <bundle id> <on|off>
-  kekkai set <bundle id> localhost|procinfo|clone <on|off>
+  kekkai set <bundle id> localhost|procinfo|lan|clone <on|off>
   kekkai allow <bundle id> add|rm <文件夹>
   kekkai decide <bundle id> allow|deny <操作> <对象>
   kekkai set-location <bundle id> <WGS-84 纬度> <经度> [名称] | -
@@ -21,7 +21,7 @@
   kekkai add|remove <App.app>
   kekkai never list|add|rm [路径]
 """
-import json, os, plistlib, re, secrets, shutil, subprocess, sys, uuid
+import functools, json, os, plistlib, re, secrets, shutil, subprocess, sys, uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -160,6 +160,81 @@ def identity(bundle_id):
     return entry["identity"]
 
 
+# 语言最常见的地区和它的时区；美国、俄罗斯这类有多个时区的地区不配时区
+COMMON_REGION = {"zh-Hans": ("CN", "Asia/Shanghai"), "zh-Hant": ("TW", "Asia/Taipei"), "en": ("US", None),
+                 "ja": ("JP", "Asia/Tokyo"), "ko": ("KR", "Asia/Seoul"), "fr": ("FR", "Europe/Paris"),
+                 "de": ("DE", "Europe/Berlin"), "es": ("ES", "Europe/Madrid"), "it": ("IT", "Europe/Rome"),
+                 "pt": ("BR", None), "ru": ("RU", None), "nl": ("NL", "Europe/Amsterdam"), "vi": ("VN", "Asia/Ho_Chi_Minh"),
+                 "th": ("TH", "Asia/Bangkok"), "id": ("ID", None)}
+
+
+@functools.lru_cache(None)
+def common_language():
+    """系统首选语言换成它最常见的写法：只留一种语言，地区取该语言最常见的。返回 (语言, 地区设置, 时区) 或 None。"""
+    langs = None
+    for p in (Path(HOME, "Library/Preferences/.GlobalPreferences.plist"), Path("/Library/Preferences/.GlobalPreferences.plist")):
+        try:
+            langs = plistlib.loads(p.read_bytes()).get("AppleLanguages")
+        except Exception:
+            continue
+        if langs:
+            break
+    if not langs:
+        return None
+    parts = langs[0].split("-")
+    base = "-".join(parts[:2]) if len(parts) > 1 and len(parts[1]) == 4 else parts[0]  # zh-Hans、sr-Latn 这类带文字
+    if base not in COMMON_REGION:
+        return None
+    region, zone = COMMON_REGION[base]
+    return f"{base}-{region}", f"{parts[0]}_{region}", zone
+
+
+@functools.lru_cache(None)
+def same_clock(zone):
+    """时区和系统时区今后两年的钟点完全一样（偏移、夏令时都一致）才可替换"""
+    from zoneinfo import ZoneInfo
+    try:
+        mine, other = ZoneInfo(os.readlink("/etc/localtime").split("zoneinfo/")[-1]), ZoneInfo(zone)
+    except Exception:
+        return False
+    start = datetime.now().timestamp()
+    return all(datetime.fromtimestamp(start + h * 3600, mine).utcoffset() == datetime.fromtimestamp(start + h * 3600, other).utcoffset()
+               for h in range(0, 2 * 365 * 24, 6))
+
+
+@functools.lru_cache(None)
+def zone_at(lat, lon):
+    """坐标所在的时区，查 CoreLocation 自带的时区边界库（离线）；海上按经度取航海时区"""
+    import sqlite3
+    db = sqlite3.connect("file:/System/Library/Frameworks/CoreLocation.framework/Versions/A/Support/timezone.db?mode=ro", uri=True)
+    try:
+        for (rid,) in db.execute("SELECT ROWID FROM BoundingBoxes WHERE MinimumLatitude <= ? AND MaximumLatitude >= ? "
+                                 "AND MinimumLongitude <= ? AND MaximumLongitude >= ?", (lat, lat, lon, lon)):
+            pts = db.execute("SELECT Latitude, Longitude FROM Points WHERE ZoneID = ? ORDER BY PointID", (rid,)).fetchall()
+            inside = False
+            for (y1, x1), (y2, x2) in zip(pts, pts[-1:] + pts[:-1]):
+                if (y1 > lat) != (y2 > lat) and lon < (x2 - x1) * (lat - y1) / (y2 - y1) + x1:
+                    inside = not inside
+            if inside:
+                return db.execute("SELECT ZoneName FROM Names WHERE ROWID = ?", (rid,)).fetchone()[0]
+    except sqlite3.Error:
+        pass
+    finally:
+        db.close()
+    hours = round(lon / 15)
+    return "Etc/GMT" if hours == 0 else f"Etc/GMT{-hours:+d}"  # Etc 时区的符号与通常写法相反
+
+
+def app_zone(conf, rule):
+    """软件看到的时区：设置里选过的；跟随虚拟位置的按坐标查；没选过就换成语言常见地区里钟点完全一样的时区"""
+    if conf.get("tz") == "location" and conf.get("location"):
+        return zone_at(conf["location"]["lat"], conf["location"]["lon"])
+    if conf.get("tz") not in (None, "location") or opt(rule, conf, "keep_identity"):
+        return conf.get("tz") if conf.get("tz") != "location" else None
+    lang = common_language()
+    return lang[2] if lang and lang[2] and same_clock(lang[2]) else None
+
+
 def settings():
     p = STATE / "settings.json"
     return json.loads(p.read_text()) if p.exists() else {}
@@ -181,7 +256,7 @@ def set_field(bundle_id, key, value):
 
 
 # 隔离开关：界面里的名字 → 设置里的键。没设置时用规则文件的默认，再没有就是最严
-OPTIONS = {"localhost": "allow_localhost", "procinfo": "allow_procinfo", "clone": "clone"}
+OPTIONS = {"localhost": "allow_localhost", "procinfo": "allow_procinfo", "lan": "allow_lan", "clone": "clone"}
 
 
 OPTION_DEFAULTS = {}  # 默认全部最严
@@ -192,7 +267,7 @@ def opt(rule, conf, key):
 
 
 def set_tz(bundle_id, tz):
-    if tz != "-" and not Path("/usr/share/zoneinfo", tz).is_file():
+    if tz not in ("-", "location") and not Path("/usr/share/zoneinfo", tz).is_file():
         sys.exit(t(f"未知时区：{tz}", f"Unknown time zone: {tz}"))
     set_field(bundle_id, "tz", tz)
 
@@ -1000,7 +1075,8 @@ def run(app, learn=False):
         data = settings()  # 不在应用程序文件夹里的软件，记下来让它留在列表里
         data["_apps"] = sorted({*data.get("_apps", []), original})
         save_settings(data)
-    env = {"TZ": conf["tz"]} if conf.get("tz") else {}
+    zone = app_zone(conf, rule)
+    env = {"TZ": zone} if zone else {}
     cwd = "/"
     sb = STATE / f"{bundle_id}.sb"
     if learn:
@@ -1040,7 +1116,13 @@ def run(app, learn=False):
             env["KEKKAI_PASTE"] = "1"
         if not opt(rule, conf, "allow_procinfo"):
             env["KEKKAI_PROCS"] = "1"
-        if "KEKKAI_HOME" in env or "KEKKAI_SEED" in env or "KEKKAI_PORTS" in env or "KEKKAI_PASTE" in env or "KEKKAI_PROCS" in env:
+        if not opt(rule, conf, "allow_lan"):
+            env["KEKKAI_NOLAN"] = "1"
+        lang = common_language() if "__CFPREFERENCES_AVOID_DAEMON" in env and not opt(rule, conf, "keep_identity") else None
+        if lang:  # 只在偏好设置不经系统服务时改，否则会写进真实的偏好设置
+            env.update(KEKKAI_LANG=lang[0], KEKKAI_LOCALE=lang[1])
+        if any(k in env for k in ("KEKKAI_HOME", "KEKKAI_SEED", "KEKKAI_PORTS", "KEKKAI_PASTE", "KEKKAI_PROCS",
+                                  "KEKKAI_NOLAN", "KEKKAI_LANG")):
             libs.append("libkekkai.dylib")
     if fake:
         libs.append("libfakeloc.dylib")
@@ -1313,7 +1395,8 @@ def list_apps():
             inj = cache[key]["inj"] or (opt(load_rule(bundle_id), c, "clone") and not cache[key]["q"])  # 带隔离标记的不用副本
             out.append({"id": bundle_id, "name": app.stem, "path": str(app), "sandboxed": cache[key]["sandboxed"],
                         "perms": [t(PERMISSIONS[k], PERMISSIONS_EN[k]) for k in cache[key]["perm_keys"]], "inside": inside, "running": f"{app}/Contents/MacOS/{exe}" in procs,
-                        "tz": c.get("tz"), "mode": effective_mode(bundle_id, c, load_rule(bundle_id)),
+                        "tz": c.get("tz"), "zone": app_zone(c, load_rule(bundle_id)), "mode": effective_mode(bundle_id, c, load_rule(bundle_id)),
+                        "language": common_language()[0] if inj and common_language() and effective_mode(bundle_id, c, load_rule(bundle_id)) == "space" and not opt(load_rule(bundle_id), c, "keep_identity") else None,
                         "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c, inj), "clipboard": clipboard_mode(c, inj), "injectable": inj, "canClone": not cache[key]["inj"] and not cache[key]["q"], "location": c.get("location"), "identity": c.get("identity"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "options": {k: opt(load_rule(bundle_id), c, v) for k, v in OPTIONS.items()}, "autoEnabled": c.get("auto_enabled", []), "tuned": bool(c.get("tuned")), "reviewed": bool(c.get("decided")), "space": str(space), "hasSpace": space.exists(), "added": str(app) in added,
                         "outside": outside_parts(str(app), bundle_id, tree, jobs) if str(app) in added else []})
     if "_added" not in conf:  # 有“添加”之前就在结界里用过的软件，直接算已添加

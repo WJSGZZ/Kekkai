@@ -13,7 +13,7 @@
   kekkai set-block <bundle id> clipboard <on|off>
   kekkai set-clipboard <bundle id> off|paste|on
   kekkai set-open <bundle id> <on|off>
-  kekkai set <bundle id> localhost|procinfo|keychain <on|off>
+  kekkai set <bundle id> localhost|procinfo|keychain|clone <on|off>
   kekkai allow <bundle id> add|rm <文件夹>
   kekkai decide <bundle id> allow|deny <操作> <对象>
   kekkai set-location <bundle id> <WGS-84 纬度> <经度> [名称] | -
@@ -176,7 +176,7 @@ def set_field(bundle_id, key, value):
 
 
 # 隔离开关：界面里的名字 → 设置里的键。没设置时用规则文件的默认，再没有就是最严
-OPTIONS = {"localhost": "allow_localhost", "procinfo": "allow_procinfo", "keychain": "block_keychain"}
+OPTIONS = {"localhost": "allow_localhost", "procinfo": "allow_procinfo", "keychain": "block_keychain", "clone": "clone"}
 
 
 OPTION_DEFAULTS = {"block_keychain": True}  # 默认全部最严
@@ -262,8 +262,7 @@ def import_container(bundle_id):
     r = subprocess.run(["/bin/cp", "-cR", str(src), str(tmp)], capture_output=True, text=True)
     if r.returncode:
         shutil.rmtree(tmp, ignore_errors=True)
-        # macOS 保护其他 App 的数据，第一次会问你是否允许结界读取
-        return t(f"导入失败：{r.stderr.strip()[:200]}", f"Import failed: {r.stderr.strip()[:200]}")
+        return copy_failed(r.stderr)
     if dst.exists():
         shutil.rmtree(dst)
     tmp.rename(dst)
@@ -296,7 +295,15 @@ def import_own(app, bundle_id, rule):
         dst.parent.mkdir(parents=True, exist_ok=True)
         r = subprocess.run(["/bin/cp", "-cR", str(src), str(dst)], capture_output=True, text=True)
         if r.returncode:
-            return t(f"导入失败：{r.stderr.strip()[:200]}", f"Import failed: {r.stderr.strip()[:200]}")
+            return copy_failed(r.stderr)
+
+
+def copy_failed(err):
+    # macOS 保护其他 App 的容器（系统策略拒绝读，实测不弹授权框），要给结界“完全磁盘访问权限”
+    if "Operation not permitted" in err:
+        return t("macOS 不允许结界读取原 App 的数据。请在“系统设置 › 隐私与安全性 › 完全磁盘访问权限”中打开“结界”，然后重试。",
+                 "macOS won't let Kekkai read the original app's data. Turn on Kekkai in System Settings › Privacy & Security › Full Disk Access, then try again.")
+    return t(f"导入失败：{err.strip()[:200]}", f"Import failed: {err.strip()[:200]}")
 
 
 def seed_space(app, bundle_id, rule, container=False):
@@ -963,7 +970,8 @@ def run(app, learn=False):
     rule, conf = load_rule(bundle_id), settings().get(bundle_id, {})
     fake = conf.get("location")
     groups = app_groups(app)
-    if sandboxed or fake and not injectable(app):  # 虚拟定位要注入，原版的强化运行时不允许，用副本
+    # 虚拟定位和设备伪装要注入，原版的强化运行时不允许，用去掉强化运行时的副本
+    if sandboxed or (fake or opt(rule, conf, "clone")) and not injectable(app):
         app = local_copy(app, bundle_id)
     binary = f"{app}/Contents/MacOS/{exe}"
     if subprocess.run(["pgrep", "-f", "^" + re.escape(binary)], capture_output=True).returncode == 0:
@@ -1241,7 +1249,7 @@ def list_apps():
             out.append({"id": bundle_id, "name": app.stem, "path": str(app), "sandboxed": cache[key]["sandboxed"],
                         "perms": [t(PERMISSIONS[k], PERMISSIONS_EN[k]) for k in cache[key]["perm_keys"]], "inside": inside, "running": f"{app}/Contents/MacOS/{exe}" in procs,
                         "tz": c.get("tz"), "mode": effective_mode(bundle_id, c, load_rule(bundle_id)),
-                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c, cache[key]["inj"]), "clipboard": clipboard_mode(c, cache[key]["inj"]), "injectable": cache[key]["inj"], "location": c.get("location"), "identity": c.get("identity"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "options": {k: opt(load_rule(bundle_id), c, v) for k, v in OPTIONS.items()}, "autoEnabled": c.get("auto_enabled", []), "tuned": bool(c.get("tuned")), "reviewed": bool(c.get("decided")), "space": str(space), "hasSpace": space.exists(), "added": str(app) in added})
+                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c, cache[key]["inj"] or opt(load_rule(bundle_id), c, "clone")), "clipboard": clipboard_mode(c, cache[key]["inj"] or opt(load_rule(bundle_id), c, "clone")), "injectable": cache[key]["inj"] or opt(load_rule(bundle_id), c, "clone"), "canClone": not cache[key]["inj"], "location": c.get("location"), "identity": c.get("identity"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "options": {k: opt(load_rule(bundle_id), c, v) for k, v in OPTIONS.items()}, "autoEnabled": c.get("auto_enabled", []), "tuned": bool(c.get("tuned")), "reviewed": bool(c.get("decided")), "space": str(space), "hasSpace": space.exists(), "added": str(app) in added})
     if "_added" not in conf:  # 有“添加”之前就在结界里用过的软件，直接算已添加
         conf["_added"] = sorted(e["path"] for e in out if e["hasSpace"] or e["id"] in conf)
         save_settings(conf)

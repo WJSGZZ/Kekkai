@@ -71,6 +71,7 @@ struct AppEntry: Codable, Identifiable, Equatable {
     var added: Bool? = nil
     var clipboard: String? = nil
     var injectable: Bool? = nil
+    var canClone: Bool? = nil
 }
 
 struct AddResult: Decodable {
@@ -125,6 +126,7 @@ final class Store: ObservableObject {
     @Published var apps: [AppEntry] = []
     @Published var message: String?
     @Published var never: [String] = []
+    @Published var loaded = false  // 第一次读到列表前不显示“还没有软件”
     @Published var selected: String?
     private var timer: Timer?
 
@@ -144,6 +146,7 @@ final class Store: ObservableObject {
             }
             DispatchQueue.main.async {
                 if self.apps != list { self.apps = list }
+                self.loaded = true
                 if let p = self.reveal, let a = list.first(where: { $0.path == p }) { self.reveal = nil; self.selected = a.id }
             }
         }
@@ -327,24 +330,32 @@ struct Detail: View {
                         }
                     }
                 } header: { Text(t("允许访问的文件夹", "Allowed folders")) } footer: {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(app.sandboxed || app.mode == "space"
-                             ? t("仅可访问以上文件夹和自身数据。数据存放于独立的结界文件夹，首次打开时从原 App 复制，此后与原 App 相互独立。",
-                                 "Everything else stays hidden. It runs in its own Kekkai folder: its existing data was copied in at first launch, and from then on it's separate from the original app, whose data stays untouched.")
-                             : t("仅可访问以上文件夹和自身数据。该软件以书签记录数据位置，因此在原位置运行。",
-                                 "Everything else stays hidden. It uses its existing data in place (this app remembers its data location with a bookmark, which breaks if moved)."))
-                        if app.sandboxed || app.mode == "space" {
-                            HStack(spacing: 14) {
-                                Button(t("从原 App 导入数据…", "Import Data from Original…")) { importing = true }
-                                if app.hasSpace {
-                                    Button(t("在访达中显示数据", "Show Its Data in Finder")) {
-                                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: app.space)
-                                    }
+                    Text(t("仅可访问以上文件夹和自身数据。", "Only these folders and its own data are accessible."))
+                        .foregroundStyle(.secondary)
+                }
+
+                Section {
+                    let space = app.sandboxed || app.mode == "space"
+                    LabeledContent(t("存放位置", "Stored in"), value: space ? t("结界文件夹", "Its Kekkai folder") : t("原位置", "Original location"))
+                    if space {
+                        HStack {
+                            Button(t("从原 App 导入…", "Import from Original…")) { importing = true }
+                            if app.hasSpace {
+                                Button(t("在访达中显示", "Show in Finder")) {
+                                    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: app.space)
                                 }
-                            }.buttonStyle(.link)
+                            }
                         }
                     }
-                    .foregroundStyle(.secondary)
+                } header: { Text(t("数据", "Data")) } footer: {
+                    Text(!(app.sandboxed || app.mode == "space")
+                         ? t("该软件以书签记录数据位置，移动后书签失效，因此在原位置运行。", "This app records its data location in a bookmark that breaks if the data moves, so it runs in place.")
+                         : app.sandboxed
+                         ? t("首次打开时已复制原 App 的数据，此后两者相互独立。导入将以原 App 的当前数据替换结界中的数据。登录状态由系统按签名保存，无法导入，需重新登录。",
+                             "The original app's data was copied at first launch; the two are independent after that. Importing replaces the data in Kekkai with the original's current data. Sign-in state is stored by macOS per signature and can't be imported; sign in again.")
+                         : t("首次打开时已复制原 App 的数据，此后两者相互独立。导入将以原 App 的当前数据替换结界中的数据。",
+                             "The original app's data was copied at first launch; the two are independent after that. Importing replaces the data in Kekkai with the original's current data."))
+                        .foregroundStyle(.secondary)
                 }
 
                 BlockLogSection(app: app, store: store)
@@ -401,7 +412,15 @@ struct Detail: View {
                                 .disabled(app.identity == nil)
                         }
                     }
+                    if app.canClone ?? false {
+                        option("clone", t("以可注入副本运行", "Run as an injectable copy"))
+                    }
                 } header: { Text(t("伪装", "Disguise")) } footer: {
+                    if app.canClone ?? false {
+                        Text(t("该软件的签名不允许注入。关闭时，设备信息仅能屏蔽，无法替换，显示器序列号无法屏蔽。开启后将运行去除强化运行时并临时签名的副本（APFS 克隆，几乎不占用额外空间），设备信息、端口和剪贴板按可注入软件处理。摄像头等系统权限需重新授权；原 App 更新后，副本将在下次打开时重建。",
+                               "This app's signature doesn't allow injection. When off, device details can only be blocked, not replaced, and the display serial can't be blocked. When on, Kekkai runs an ad-hoc signed copy without the hardened runtime (an APFS clone that uses almost no additional space), handled as injectable for device identity, ports and the clipboard. Camera and similar permissions must be granted again. The copy is rebuilt at next launch after the original app updates."))
+                            .foregroundStyle(.secondary)
+                    }
                     Text(t("结界内时间：\(clock(app.tz))。序列号、硬件 UUID、网卡地址和电脑名为结界为该软件单独生成的值，各软件互不相同；机型、系统版本等非唯一信息保持不变。重置设备身份后，该软件会将本机识别为新设备，账号可能需要重新验证；软件自行保存的设备标识需清除数据后失效。更改在下次打开时生效。",
                            "Time inside: \(clock(app.tz)). The serial number, hardware UUID, network addresses and computer name it sees are a set Kekkai made for this app alone; it can't read the real ones. Things many Macs share, such as model and macOS version, are left as is. After New Identity it treats this as a new Mac and your account may ask you to verify again; device IDs the app saved itself go only when you clear its data. Changes apply next launch."))
                         .foregroundStyle(.secondary)
@@ -628,15 +647,42 @@ struct BlockLogSection: View {
     }
 }
 
+// 常用城市的 WGS-84 坐标，离线选点用；mars 表示在中国大陆，地图上要换成 GCJ-02 显示
+let presetPlaces: [(String, String, Double, Double, Bool)] = [
+    ("北京", "Beijing", 39.9042, 116.4074, true), ("上海", "Shanghai", 31.2304, 121.4737, true),
+    ("广州", "Guangzhou", 23.1291, 113.2644, true), ("深圳", "Shenzhen", 22.5431, 114.0579, true),
+    ("杭州", "Hangzhou", 30.2741, 120.1551, true), ("成都", "Chengdu", 30.5728, 104.0668, true),
+    ("武汉", "Wuhan", 30.5928, 114.3055, true), ("西安", "Xi'an", 34.3416, 108.9398, true),
+    ("香港", "Hong Kong", 22.3193, 114.1694, false), ("台北", "Taipei", 25.0330, 121.5654, false),
+    ("东京", "Tokyo", 35.6762, 139.6503, false), ("首尔", "Seoul", 37.5665, 126.9780, false),
+    ("新加坡", "Singapore", 1.3521, 103.8198, false), ("悉尼", "Sydney", -33.8688, 151.2093, false),
+    ("伦敦", "London", 51.5074, -0.1278, false), ("巴黎", "Paris", 48.8566, 2.3522, false),
+    ("纽约", "New York", 40.7128, -74.0060, false), ("洛杉矶", "Los Angeles", 34.0522, -118.2437, false),
+]
+
 struct LocationPicker: View {
     let current: Place?
     let done: (Place?) -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var online = false  // 地图、搜索和地址反查走 Apple 地图，要联网，用户点了才加载
+    @State private var typed = ""
     @State private var position: MapCameraPosition = .automatic
     @State private var pin: Place?  // 存地图坐标，确定时再换算
     @State private var resolving = false
     @State private var query = ""
     @State private var results: [MKMapItem] = []
+
+    /// 城市中心挪开几百米，免得用同一预设的人坐标完全一样
+    func preset(_ p: (String, String, Double, Double, Bool)) {
+        let j = { Double.random(in: -0.004...0.004) }
+        done(Place(lat: p.2 + j(), lon: p.3 + j(), name: t(p.0, p.1), mars: p.4))
+        dismiss()
+    }
+    var typedPlace: Place? {
+        let n = typed.split(whereSeparator: { ", ，".contains($0) }).compactMap { Double($0) }
+        guard n.count == 2, abs(n[0]) <= 90, abs(n[1]) <= 180 else { return nil }
+        return Place(lat: n[0], lon: n[1], name: String(format: "%.4f, %.4f", n[0], n[1]))
+    }
 
     func search() {
         let request = MKLocalSearch.Request()
@@ -660,7 +706,39 @@ struct LocationPicker: View {
         results = []
     }
 
-    var body: some View {
+    var offline: some View {
+        Form {
+            Section {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 4), spacing: 8) {
+                    ForEach(presetPlaces, id: \.1) { p in
+                        Button(t(p.0, p.1)) { preset(p) }.frame(maxWidth: .infinity)
+                    }
+                }
+            } header: { Text(t("常用城市", "Cities")) } footer: {
+                Text(t("使用城市中心附近的随机位置。", "Uses a random point near the city center.")).foregroundStyle(.secondary)
+            }
+            Section {
+                HStack {
+                    TextField(t("纬度, 经度", "Latitude, longitude"), text: $typed).onSubmit { if let p = typedPlace { done(p); dismiss() } }
+                    Button(t("使用", "Use")) { if let p = typedPlace { done(p); dismiss() } }.disabled(typedPlace == nil)
+                }
+            } header: { Text(t("坐标", "Coordinates")) } footer: {
+                Text(t("WGS-84 坐标，与 GPS 及国际版地图一致。中国大陆地图 App 使用的 GCJ-02 坐标存在数百米偏差。",
+                       "WGS-84, as used by GPS and most maps outside mainland China. GCJ-02 coordinates from mainland Chinese map apps differ by several hundred meters."))
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Button(t("在地图上选择…", "Choose on a Map…")) { online = true }
+            } footer: {
+                Text(t("地图、搜索和地名由 Apple 地图提供，需要联网，搜索内容和所选位置将发送给 Apple。结界的其他功能均不联网。",
+                       "The map, search and place names are provided by Apple Maps over the internet; search terms and the selected location are sent to Apple. No other part of Kekkai connects to the internet."))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    var map: some View {
         VStack(spacing: 0) {
             HStack {
                 TextField(t("搜索地点", "Search for a place"), text: $query).textFieldStyle(.roundedBorder).onSubmit(search)
@@ -691,21 +769,31 @@ struct LocationPicker: View {
                     .frame(maxHeight: 220).clipShape(RoundedRectangle(cornerRadius: 8)).padding(10)
                 }
             }
-            HStack {
-                Text(pin.map { $0.name } ?? t("搜索地点，或在地图上点按选择", "Search for a place, or click the map")).foregroundStyle(.secondary).lineLimit(1)
-                Spacer()
-                if current != nil { Button(t("关闭虚拟位置", "Turn Off")) { done(nil); dismiss() } }
-                Button(t("取消", "Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
-                Button(t("使用这个位置", "Use This Location"), action: use)
-                    .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent).disabled(pin == nil || resolving)
-            }
-            .padding(12)
         }
-        .frame(width: 640, height: 520)
         .onAppear {
             pin = current.map { Place(lat: $0.mapCoordinate.latitude, lon: $0.mapCoordinate.longitude, name: $0.name) }
             if let c = current?.mapCoordinate { position = .region(MKCoordinateRegion(center: c, latitudinalMeters: 3000, longitudinalMeters: 3000)) }
         }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if online { map } else { offline }
+            HStack {
+                Text(online ? (pin.map { $0.name } ?? t("搜索地点，或在地图上点按选择", "Search for a place, or click the map"))
+                            : t("当前：\(current?.name ?? "关")", "Current: \(current?.name ?? "Off")"))
+                    .foregroundStyle(.secondary).lineLimit(1)
+                Spacer()
+                if current != nil { Button(t("关闭虚拟位置", "Turn Off")) { done(nil); dismiss() } }
+                Button(t("取消", "Cancel")) { dismiss() }.keyboardShortcut(.cancelAction)
+                if online {
+                    Button(t("使用这个位置", "Use This Location"), action: use)
+                        .keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent).disabled(pin == nil || resolving)
+                }
+            }
+            .padding(12)
+        }
+        .frame(width: 640, height: 520)
     }
 }
 
@@ -992,6 +1080,7 @@ struct ContentView: View {
         return query.isEmpty ? all : all.filter { displayName($0).localizedCaseInsensitiveContains(query) || $0.name.localizedCaseInsensitiveContains(query) }
     }
 
+    @Environment(\.openWindow) private var openWindow
     var summary: String {
         let all = store.apps.filter { $0.added == true }
         let on = all.filter(\.inside).count
@@ -1019,12 +1108,15 @@ struct ContentView: View {
                         .onTapGesture { selection = nil }
                     }
                 }
+            } else if !store.loaded {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack(spacing: 10) {
                     Image(systemName: "square.dashed").font(.system(size: 44, weight: .ultraLight)).foregroundStyle(.tertiary)
                     Text(t("还没有软件", "No apps yet")).font(.title3.weight(.medium))
                     Text(t("添加的软件仅能访问自身数据。", "Once added, an app sees only its own data.")).foregroundStyle(.secondary)
                     Button(t("添加软件…", "Add an App…")) { adding = true }.controlSize(.large).padding(.top, 6)
+                    Button(t("使用说明", "How Kekkai Works")) { openWindow(id: "help") }.buttonStyle(.link)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -1032,7 +1124,7 @@ struct ContentView: View {
         .frame(minWidth: 600, minHeight: 440)
         .background(Color(nsColor: .controlBackgroundColor))
         .navigationTitle(t("结界", "Kekkai"))
-        .navigationSubtitle(summary)
+        .navigationSubtitle(store.loaded ? summary : "")
         .searchable(text: $query, placement: .toolbar, prompt: t("搜索", "Search"))
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -1067,6 +1159,9 @@ struct ContentView: View {
         .onReceive(tick) { now = $0 }
         .onReceive(store.$selected) { if let id = $0 { selection = id } }
         .alert(t("结界", "Kekkai"), isPresented: Binding(get: { store.message != nil }, set: { if !$0 { store.message = nil } })) {
+            if let m = store.message, m.contains("完全磁盘访问权限") || m.contains("Full Disk Access") {
+                Button(t("打开系统设置", "Open System Settings")) { openPrivacy("Privacy_AllFiles") }
+            }
             Button(t("好", "OK"), role: .cancel) {}
         } message: { Text(store.message ?? "") }
     }
@@ -1097,5 +1192,103 @@ struct KekkaiApp: App {
             .windowResizability(.contentMinSize)
             .windowToolbarStyle(.unified)
         Settings { SettingsView() }
+        Window(t("结界使用说明", "Kekkai Help"), id: "help") { HelpView() }
+            .windowResizability(.contentSize)
+            .commands { HelpCommands() }
+    }
+}
+
+struct HelpCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+    var body: some Commands {
+        CommandGroup(replacing: .help) {
+            Button(t("结界使用说明", "Kekkai Help")) { openWindow(id: "help") }.keyboardShortcut("?", modifiers: .command)
+        }
+    }
+}
+
+/// 使用说明：随 App 带着，不联网
+let helpSections: [(String, [String])] = isChinese ? [
+    ("开始使用", [
+        "点按工具栏中的“添加”按钮，或将 App 拖入窗口。添加时将进行一次试运行，App 在约 20 秒内正常启动方可加入；未能启动时将显示原因，并清除试运行产生的文件。",
+        "连按图标可在结界中打开 App，单击图标可查看设置和拦截记录。按住 Control 点按图标，可在“应用程序”中创建结界入口，供程序坞和聚焦使用。",
+        "打开前请完全退出原 App。通过原图标打开的 App 不受结界保护。",
+    ]),
+    ("隔离范围", [
+        "文件：仅可访问自身数据和已批准的文件夹，其他位置均显示为不存在。",
+        "设备信息：序列号、硬件 UUID、网卡地址等替换为该 App 专用的值，各 App 之间互不相同。",
+        "其他程序：无法查看其他进程，无法连接本机其他程序提供的端口，无法打开其他 App。",
+        "剪贴板：默认可随时写入，仅在按下 ⌘V 或选择“粘贴”后可读取。",
+    ]),
+    ("数据与登录", [
+        "首次打开时，结界将原 App 的数据复制到该 App 的结界文件夹，此后两者相互独立，原数据保持不变。如需更新，可在“数据”一栏重新导入。",
+        "QQ、微信等自带 App 沙盒的 App 以副本运行。登录状态由系统按签名保存，无法导入，首次打开需重新登录。",
+        "每个 App 使用其结界文件夹中的独立钥匙串，无法读取你的钥匙串。",
+    ]),
+    ("权限", [
+        "设置中的权限默认全部关闭，开启即允许，更改在下次打开 App 时生效。",
+        "App 功能异常时，请先查看拦截记录。排在前面且标有“本次运行”的项目最可能相关，可逐项放行。",
+    ]),
+    ("常见问题", [
+        "无法添加：App Store 付费 App 会校验购买凭证，副本无法通过校验，因此不受支持。其他原因见提示信息。",
+        "导入失败：请在“系统设置 › 隐私与安全性 › 完全磁盘访问权限”中开启“结界”。",
+        "摄像头、麦克风、定位：由 macOS 管理，可通过设置底部的按钮前往对应的系统设置。",
+        "伪装不完整：部分 App 的签名不允许注入，设备信息仅能屏蔽、无法替换。可在“伪装”一栏开启“以可注入副本运行”。",
+        "时区：可按 App 单独设置。使用代理的 App，建议将时区设为代理出口所在地区；两者不一致时更易被识别。",
+    ]),
+    ("隐私", [
+        "结界本身不联网。仅当在虚拟位置中选择“在地图上选择”时加载 Apple 地图。",
+        "结界保护的是本机信息。基于 IP 地址的定位，以及基于账号和使用习惯的识别，不在其保护范围内。",
+    ]),
+] : [
+    ("Getting Started", [
+        "Click Add in the toolbar, or drag an app into the window. Adding performs a trial run: the app is added only if it starts within about 20 seconds. Otherwise Kekkai shows the reason and removes the files the trial created.",
+        "Double-click an icon to open the app in Kekkai; click once to view its settings and Block Log. Control-click an icon to create a Kekkai launcher in Applications for the Dock and Spotlight.",
+        "Quit the original app completely first. An app opened from its own icon isn't protected by Kekkai.",
+    ]),
+    ("What Is Isolated", [
+        "Files: only the app's own data and approved folders are accessible. All other locations appear not to exist.",
+        "Device information: the serial number, hardware UUID, network addresses and similar values are replaced with values unique to the app.",
+        "Other programs: the app can't see other processes, connect to ports opened by other programs on this Mac, or open other apps.",
+        "Clipboard: by default the app can write at any time and read only after you press ⌘V or choose Paste.",
+    ]),
+    ("Data and Sign-In", [
+        "At first launch, Kekkai copies the original app's data into the app's Kekkai folder. The two are independent after that, and the original data is unchanged. To update it, import again from the Data section.",
+        "Apps that include Apple's App Sandbox, such as QQ and WeChat, run as a copy. Sign-in state is stored by macOS per signature and can't be imported; sign in again at first launch.",
+        "Each app uses a separate keychain in its Kekkai folder and can't read your keychain.",
+    ]),
+    ("Permissions", [
+        "All permissions in Settings are off by default. Turning one on allows it; changes take effect the next time the app opens.",
+        "If the app doesn't work as expected, check the Block Log first. Items near the top marked This Run are the most likely cause and can be allowed individually.",
+    ]),
+    ("Troubleshooting", [
+        "Can't add an app: paid App Store apps verify their purchase receipt, which a copy can't pass, so they aren't supported. Other reasons are shown in the message.",
+        "Import fails: turn on Kekkai in System Settings › Privacy & Security › Full Disk Access.",
+        "Camera, microphone and location: managed by macOS. Use the buttons at the bottom of an app's settings to open the relevant System Settings pane.",
+        "Incomplete disguise: some apps' signatures don't allow injection, so device information can be blocked but not replaced. Turn on Run as an injectable copy in Disguise.",
+        "Time zone: set per app. For an app that uses a proxy, set the time zone to the proxy's region; a mismatch makes identification easier.",
+    ]),
+    ("Privacy", [
+        "Kekkai doesn't connect to the internet. Apple Maps loads only when you click Choose on a Map in the virtual-location picker.",
+        "Kekkai protects information on this Mac. Location by IP address, and identification by account or usage patterns, are outside its scope.",
+    ]),
+]
+
+struct HelpView: View {
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                ForEach(helpSections, id: \.0) { section in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(section.0).font(.title3.weight(.semibold))
+                        ForEach(section.1, id: \.self) { Text($0).fixedSize(horizontal: false, vertical: true) }
+                    }
+                }
+            }
+            .textSelection(.enabled)
+            .padding(28)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(width: 560, height: 620)
     }
 }

@@ -7,6 +7,7 @@ set -euo pipefail
 src="$(cd "$(dirname "$0")/.." && pwd)"
 ver="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$src/Info.plist")"
 vol="结界"; out="$src/build/Kekkai-$ver.dmg"
+unset KEKKAI_SIGN  # 分发包临时签名，不带开发者账号
 app="$("$src/scripts/build.sh" | tail -1)"
 work="$src/build/dmg-work"; rm -rf "$work"; mkdir -p "$work/stage/.background"
 ditto "$app" "$work/stage/Kekkai.app"

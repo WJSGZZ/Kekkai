@@ -33,6 +33,8 @@ git clone https://github.com/WJSGZZ/Kekkai.git && cd Kekkai && ./install.sh
 
 Open Kekkai, then click **+** or drop an app onto the window. Adding an app is a trial run: it's added only if it starts within about 20 seconds, with any permission it can't live without switched on. If it fails, Kekkai says why (a paid App Store app checking its receipt, an unnotarized app, a failed code signature check) and cleans up. Double-click to launch in Kekkai; single-click for settings and the Block Log.
 
+`install.sh` signs with your Apple Development certificate if the keychain has one, so permissions such as Full Disk Access survive rebuilds; otherwise it signs ad hoc and every rebuild needs them granted again.
+
 Quit the app fully first; launching it from its own icon bypasses Kekkai. To ship Kekkai to another Mac, `scripts/make-dmg.sh` builds a disk image (ad-hoc signed and not notarized, so the first launch needs approval in Privacy & Security).
 
 ## How it works
@@ -53,7 +55,7 @@ flowchart LR
 - **Injected library.** DYLD interposition answers on the system's behalf: a fake user, a per-app device identity, port remapping, a clipboard read gate and a process table that contains only the app. Works only for apps whose signature allows injection.
 - **Kekkai folder.** `/Users/Shared/Kekkai.noindex/<bundle id>`, with `HOME` pointed at it. On first launch Kekkai finds the app's existing data by bundle ID, app group and same-named data folders, and brings it in as an APFS clone; the original stays untouched.
 
-Apps with the hardened runtime and library validation can't be injected, and rely on the sandbox alone. Apps that ship with Apple's App Sandbox, such as QQ and WeChat, run as an unsandboxed, ad-hoc re-signed clone that can be injected ([details](#apps-that-ship-with-apples-sandbox)).
+Apps with the hardened runtime and library validation can't be injected, and rely on the sandbox alone unless you turn on *Run as an injectable copy*: Kekkai then runs an ad-hoc signed APFS clone without the hardened runtime, which costs almost no disk space (about 7 MB for a 480 MB Electron app) and gets everything in the Injectable column. Apps that ship with Apple's App Sandbox, such as QQ and WeChat, run as an unsandboxed, ad-hoc re-signed clone that can be injected ([details](#apps-that-ship-with-apples-sandbox)).
 
 ## What an app sees
 
@@ -73,6 +75,8 @@ macOS itself redacts the Wi-Fi name and BSSID for apps without location permissi
 
 **Block Log.** While an app runs, the detail pane refreshes every few seconds with denials from the system log, grouped as Overreach, Worth a look and Routine. If the app quits early, the requests blocked just before it quit that can safely be allowed are listed first for a per-item decision. Locations that would expose other apps' data can never be allowed.
 
+**Offline.** Kekkai itself makes no network connections. The one exception is opt-in: *Choose on a Map* in the virtual-location picker loads Apple Maps. Preset cities and typed coordinates work offline.
+
 ## Field notes
 
 Tested on macOS 27.2.
@@ -90,7 +94,7 @@ Tested on macOS 27.2.
 
 Such apps crash inside the system sandbox's initialization when wrapped by `sandbox-exec`, so Kekkai runs a clone: an APFS copy under the Kekkai folder's `Applications`, stripped of the App Sandbox and of entitlements that need a developer certificate, then ad-hoc signed.
 
-- The clone can't enter the original container (`~/Library/Containers/<id>`); System Policy admits only the original signature (EPERM in testing). Its container data is cloned in when the copy is created, and *Import Data from Original* refreshes it any time.
+- The clone can't enter the original container (`~/Library/Containers/<id>`); System Policy admits only the original signature (EPERM in testing). Its container data is cloned in when the copy is created, and *Import Data from Original* refreshes it any time. macOS protects other apps' containers, so this needs Full Disk Access for Kekkai; without it the import stops and offers to open the setting.
 - Sign-in tokens are held by the system per signature, so expect to sign in again and to re-grant camera and microphone access.
 - When the original app updates, the clone is rebuilt on next launch. The original keeps working; the two don't sync.
 - The clone loses App Sandbox's deny-by-default floor and relies on Kekkai's rules.
@@ -113,7 +117,7 @@ kekkai add|remove <App.app>                       add (with trial run) / remove
 kekkai run|stop|blocked <App.app>                 launch / stop / export the Block Log
 kekkai list                                       all apps and settings as JSON
 kekkai allow <id> add|rm <folder>                 approve a folder
-kekkai set <id> localhost|procinfo|keychain on|off
+kekkai set <id> localhost|procinfo|keychain|clone on|off
 kekkai set-clipboard <id> off|paste|on
 kekkai set-open <id> on|off                       allow opening other apps and links
 kekkai set-tz <id> <time zone|->
@@ -129,7 +133,7 @@ Per-app exceptions live in `rules/<bundle id>.json` and are kept to a minimum. T
 ## Limits
 
 - Not stealth: an app can tell it's sandboxed, and the user ID is real.
-- Non-injectable apps can still read the display serial and UUID; they come from the window server, which the sandbox doesn't govern. The list of running apps comes from LaunchServices; blocking it stops GUI apps from launching.
+- Non-injectable apps run without a copy can still read the display serial and UUID; they come from the window server, which the sandbox doesn't govern. The list of running apps comes from LaunchServices; blocking it stops GUI apps from launching.
 - Internet traffic isn't restricted. LAN devices are covered by macOS's Local Network permission; IP-based location needs a proxy.
 - The Block Log sees only denials the system logs, and the log keeps only some repeats.
 - System extensions (such as a cloud drive's sync extension) are out of scope. Gatekeeper and App Store receipt checks are not bypassed.

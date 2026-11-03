@@ -19,5 +19,7 @@ for l in en zh-Hans; do mkdir -p "$res/$l.lproj"; done
 printf 'CFBundleName = "Kekkai";\nCFBundleDisplayName = "Kekkai";\n' > "$res/en.lproj/InfoPlist.strings"
 printf 'CFBundleName = "结界";\nCFBundleDisplayName = "结界";\n' > "$res/zh-Hans.lproj/InfoPlist.strings"
 codesign -f -s - "$sup/libfakeloc.dylib" "$sup/libkekkai.dylib"
-codesign -f -s - "$app"
+# KEKKAI_SIGN 指定本机的签名证书（install.sh 会自动找开发证书）：签名固定，系统授权（如完全磁盘访问权限）重新构建后仍然有效。
+# 不设就临时签名，每次构建系统都当成新程序。分发用的安装映像不设，证书名里有开发者的账号
+codesign -f -s "${KEKKAI_SIGN:--}" "$app"
 echo "$app"

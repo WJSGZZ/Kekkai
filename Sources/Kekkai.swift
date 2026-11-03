@@ -69,6 +69,8 @@ struct AppEntry: Codable, Identifiable, Equatable {
     var reviewed: Bool
     let space: String
     var added: Bool? = nil
+    var clipboard: String? = nil
+    var injectable: Bool? = nil
 }
 
 struct AddResult: Decodable {
@@ -269,16 +271,17 @@ struct Detail: View {
     }
 
     var header: some View {
-        HStack(spacing: 16) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().frame(width: 64, height: 64)
-            VStack(alignment: .leading, spacing: 6) {
-                Text(displayName(app)).font(.title.weight(.semibold))
-                HStack(spacing: 6) {
-                    Circle().fill(status.1).frame(width: 8, height: 8)
-                    Text(status.0).foregroundStyle(.secondary)
+        HStack(alignment: .center, spacing: 14) {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().interpolation(.high).frame(width: 56, height: 56)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(displayName(app)).font(.title2.weight(.semibold)).lineLimit(1).truncationMode(.tail)
+                HStack(spacing: 5) {
+                    Circle().fill(status.1).frame(width: 7, height: 7)
+                    Text(status.0).font(.callout).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
-            Spacer()
+            .layoutPriority(1)
+            Spacer(minLength: 8)
             if app.inside {
                 Button(t("停止", "Stop")) { store.perform(["stop", app.path]) }.controlSize(.large)
             } else {
@@ -286,13 +289,14 @@ struct Detail: View {
                     Button(t("在“应用程序”中创建入口", "Add a Kekkai Launcher to Applications")) { store.makeLauncher(app) }
                     Divider()
                     Button(t("从结界移除…", "Remove from Kekkai…")) { removing = true }
-                } label: { Text(t("在结界中打开", "Open in Kekkai")) } primaryAction: { store.open(path: app.path) }
+                } label: { Text(t("打开", "Open")) } primaryAction: { store.open(path: app.path) }
                     .menuStyle(.button).fixedSize()
                     .buttonStyle(.borderedProminent).controlSize(.large)
                     .keyboardShortcut(.defaultAction).disabled(app.running)
+                    .help(t("在结界中打开", "Open in Kekkai"))
             }
         }
-        .padding(.horizontal, 24).padding(.top, 22).padding(.bottom, 6)
+        .padding(.horizontal, 20).padding(.top, 18).padding(.bottom, 4)
     }
 
     var body: some View {
@@ -305,8 +309,9 @@ struct Detail: View {
                     }
                     ForEach(app.allow, id: \.self) { p in
                         HStack {
-                            Image(systemName: "folder")
+                            Image(nsImage: NSWorkspace.shared.icon(forFile: p)).resizable().frame(width: 16, height: 16)
                             Text((p as NSString).abbreviatingWithTildeInPath).lineLimit(1).truncationMode(.middle)
+                                .help((p as NSString).abbreviatingWithTildeInPath)
                             Spacer()
                             Button(t("移除", "Remove")) { set(["allow", app.id, "rm", p]) { $0.allow.removeAll { $0 == p } } }
                         }
@@ -345,10 +350,15 @@ struct Detail: View {
                 BlockLogSection(app: app, store: store)
 
                 Section {
-                    Toggle(t("剪贴板与拖放", "Clipboard and drag and drop"), isOn: Binding(
-                        get: { !app.block.contains("clipboard") },
-                        set: { v in set(["set-block", app.id, "clipboard", v ? "off" : "on"]) { e in
-                            e.block = e.block.filter { $0 != "clipboard" } + (v ? [] : ["clipboard"]) } }))
+                    Picker(t("剪贴板与拖放", "Clipboard and drag and drop"), selection: Binding(
+                        get: { app.clipboard ?? (app.block.contains("clipboard") ? "off" : "on") },
+                        set: { v in set(["set-clipboard", app.id, v]) { e in
+                            e.clipboard = v
+                            e.block = e.block.filter { $0 != "clipboard" } + (v == "off" ? ["clipboard"] : []) } })) {
+                        Text(t("禁止", "Off")).tag("off")
+                        if app.injectable ?? false { Text(t("可写入，粘贴时可读", "Write, read on paste")).tag("paste") }
+                        Text(t("允许", "On")).tag("on")
+                    }
                     Toggle(t("你的钥匙串", "Your keychain"), isOn: Binding(
                         get: { !(app.options?["keychain"] ?? false) },
                         set: { v in set(["set", app.id, "keychain", v ? "off" : "on"]) { $0.options?["keychain"] = !v } }))
@@ -363,8 +373,8 @@ struct Detail: View {
                         Text(t("添加时自动开启：\(auto.joined(separator: "、"))（关闭后无法启动）。", "Turned on automatically at first launch: \(auto.joined(separator: ", ")). It failed to start without them."))
                             .foregroundStyle(.orange)
                     }
-                    Text(t("开启即允许，默认全部关闭，更改在下次打开时生效。“你的钥匙串”关闭时使用结界文件夹内的独立钥匙串，首次需重新登录。“本机端口”指本机其他程序提供的网络服务，如代理面板、开发服务器。经它打开的其他 App 不受结界限制。",
-                           "On means allowed; everything is off by default. With Your keychain off, the app gets its own keychain in its Kekkai folder, so sign-ins are still remembered after you sign in once. Ports on this Mac are network services opened by other programs here, such as proxy dashboards and dev servers. Apps it opens run outside Kekkai. Changes apply next launch."))
+                    Text(t("开启即允许，默认全部关闭，更改在下次打开时生效。剪贴板“粘贴时可读”：软件可随时写入，只有按 ⌘V 或点“粘贴”时才能读取内容。“你的钥匙串”关闭时使用结界文件夹内的独立钥匙串，首次需重新登录。“本机端口”指本机其他程序提供的网络服务，如代理面板、开发服务器；关闭时只能连结界分配给它的一组端口，可注入的软件自己开的端口会移入这组，自身各部分照常互连。经它打开的其他 App 不受结界限制。",
+                           "On means allowed; everything is off by default. With the clipboard set to Write, read on paste, the app can copy anytime but reads the clipboard only when you press ⌘V or choose Paste. With Your keychain off, the app gets its own keychain in its Kekkai folder, so sign-ins are still remembered after you sign in once. Ports on this Mac are network services opened by other programs here, such as proxy dashboards and dev servers. With it off, the app reaches only a set of ports Kekkai assigns it; when Kekkai can inject into the app, ports it opens itself are moved into that set, so its own parts still connect. Apps it opens run outside Kekkai. Changes apply next launch."))
                         .foregroundStyle(.secondary)
                 }
 
@@ -821,6 +831,34 @@ struct AppTile: View {
     }
 }
 
+/// 从左到右排、放不下就换行；容器宽度变化时已有的位置不动
+struct TileFlow: Layout {
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 14
+
+    func frames(_ width: CGFloat, _ subviews: Subviews) -> ([CGRect], CGFloat) {
+        var x: CGFloat = 0, y: CGFloat = 0, row: CGFloat = 0, out: [CGRect] = []
+        for s in subviews {
+            let size = s.sizeThatFits(.unspecified)
+            if x > 0 && x + size.width > width { x = 0; y += row + lineSpacing; row = 0 }
+            out.append(CGRect(origin: CGPoint(x: x, y: y), size: size))
+            x += size.width + spacing
+            row = max(row, size.height)
+        }
+        return (out, y + row)
+    }
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        let (rects, height) = frames(width, subviews)
+        return CGSize(width: proposal.width ?? (rects.map(\.maxX).max() ?? 0), height: height)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for (s, r) in zip(subviews, frames(bounds.width, subviews).0) {
+            s.place(at: CGPoint(x: bounds.minX + r.minX, y: bounds.minY + r.minY), proposal: ProposedViewSize(r.size))
+        }
+    }
+}
+
 /// 添加：选一个软件，在结界里试运行，撑得住才加进来
 struct AddSheet: View {
     @ObservedObject var store: Store
@@ -960,36 +998,27 @@ struct ContentView: View {
         return on > 0 ? t("\(all.count) 个软件 · \(on) 个正在结界中", "\(all.count) apps · \(on) in Kekkai now") : t("\(all.count) 个软件", "\(all.count) apps")
     }
 
-    var header: some View {
-        HStack(spacing: 14) {
-            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 40, height: 40)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(t("结界", "Kekkai")).font(.title2.weight(.semibold))
-            }
-            Spacer()
-            Text(summary).font(.callout).foregroundStyle(.secondary).monospacedDigit()
-        }
-        .padding(.horizontal, 28).padding(.top, 18).padding(.bottom, 14)
-    }
-
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider().opacity(0.5)
+        Group {
             if store.apps.contains(where: { $0.added == true }) {
-                ScrollView {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 100, maximum: 110), spacing: 8)], spacing: 12) {
-                        ForEach(added) { app in
-                            AppTile(app: app, selected: selection == app.id)
-                                .onTapGesture(count: 2) { store.launch(app) }
-                                .simultaneousGesture(TapGesture().onEnded { selection = app.id })
-                                .contextMenu { menu(app) }
-                                .help(t("双击在结界中打开", "Double-click to open in Kekkai"))
+                // 图标靠左排、位置固定：侧边栏展开时左边变窄，图标不跟着每帧重排，放不下才换行
+                GeometryReader { geo in
+                    ScrollView {
+                        TileFlow {
+                            ForEach(added) { app in
+                                AppTile(app: app, selected: selection == app.id)
+                                    .onTapGesture(count: 2) { store.launch(app) }
+                                    .simultaneousGesture(TapGesture().onEnded { selection = app.id })
+                                    .contextMenu { menu(app) }
+                                    .help(t("双击在结界中打开", "Double-click to open in Kekkai"))
+                            }
                         }
+                        .padding(.horizontal, 20).padding(.vertical, 24)
+                        .frame(maxWidth: .infinity, minHeight: geo.size.height, alignment: .topLeading)
+                        .contentShape(Rectangle())
+                        .onTapGesture { selection = nil }
                     }
-                    .padding(28)
                 }
-                .background(Color(nsColor: .windowBackgroundColor).onTapGesture { selection = nil })
             } else {
                 VStack(spacing: 10) {
                     Image(systemName: "square.dashed").font(.system(size: 44, weight: .ultraLight)).foregroundStyle(.tertiary)
@@ -1001,7 +1030,9 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 600, minHeight: 440)
-        .navigationTitle("")
+        .background(Color(nsColor: .controlBackgroundColor))
+        .navigationTitle(t("结界", "Kekkai"))
+        .navigationSubtitle(summary)
         .searchable(text: $query, placement: .toolbar, prompt: t("搜索", "Search"))
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -1064,7 +1095,7 @@ struct KekkaiApp: App {
     var body: some Scene {
         WindowGroup(t("结界", "Kekkai")) { ContentView() }
             .windowResizability(.contentMinSize)
-            .windowToolbarStyle(.unifiedCompact)
+            .windowToolbarStyle(.unified)
         Settings { SettingsView() }
     }
 }

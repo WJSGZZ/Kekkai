@@ -11,6 +11,7 @@
   kekkai set-mode <bundle id> <space|real>
   kekkai set-bring-old <bundle id> <on|off>
   kekkai set-block <bundle id> clipboard <on|off>
+  kekkai set-clipboard <bundle id> off|paste|on
   kekkai set-open <bundle id> <on|off>
   kekkai set <bundle id> localhost|procinfo|keychain <on|off>
   kekkai allow <bundle id> add|rm <文件夹>
@@ -41,7 +42,9 @@ LIBDIR = SPACES / ".lib"  # 注入库放这里：路径里没有你的用户名�
 OWN_BASES = ["Application Support", "Caches", "Preferences", "Logs", "HTTPStorages", "WebKit", "Cookies",
              "Saved Application State", "Containers", "Group Containers", "Application Scripts"]
 BLOCKED = [HOME, "/Users/Shared", "/Applications", "/Volumes", "/private/tmp"]
-NO_EXEC = ["/bin/launchctl", "/usr/bin/open", "/usr/bin/osascript"]
+NO_EXEC = ["/bin/launchctl", "/usr/bin/open", "/usr/bin/osascript",
+           # 会说出局域网邻居和路由器网卡地址、Wi-Fi 信息的系统工具；系统程序不能注入，只能不让跑
+           "/usr/sbin/arp", "/usr/sbin/ndp", "/usr/sbin/netstat", "/usr/sbin/ipconfig", "/usr/sbin/system_profiler"]
 DIRECTORY_SERVICES = ["com.apple.system.opendirectoryd.libinfo", "com.apple.system.opendirectoryd.api",
                       "com.apple.system.opendirectoryd.membership", "com.apple.system.DirectoryService.libinfo_v1"]
 DEFAULT_NEVER = [f"{HOME}/.ssh", f"{HOME}/.gnupg", f"{HOME}/.aws"]
@@ -126,6 +129,11 @@ def injectable(app):
 
 # 会认出这台 Mac 的硬件属性；能注入的软件拿到假值，不能注入的直接拿不到
 HARDWARE_IDS = ["IOPlatformSerialNumber", "IOPlatformUUID", "serial-number", "mlb-serial-number", "IOMACAddress"]
+# 磁盘、电池、蓝牙、芯片、触控板、键盘、显示器的序列号和 UUID（实测结界里原本都读得到，且各软件读到的一样）。
+# 能注入的软件放行，由注入库按它的种子换成另一套（要照着原值的格式换）；不能注入的直接挡
+DEVICE_IDS = ["UUID", "VolGroupUUID", "SerialNumber", "Serial", "ECID", "ecid", "unique-chip-id", "BD_ADDR", "local-mac-address",
+              "mac-address", "USB Serial Number", "kUSBSerialNumberString", "BatteryData", "EDID", "IODisplayEDID",
+              "IODisplayEDIDOriginal", "DisplayAttributes"]
 
 
 def model_name():
@@ -340,8 +348,22 @@ def ancestors(path):
     return [str(p) for p in Path(path).parents if str(p) != "/"]
 
 
-def blocked_devices(conf):
-    return [d for d in DEVICES if conf.get("block", DEFAULT_BLOCK).count(d)]
+def blocked_devices(conf, injected=False):
+    # 剪贴板：能注入的默认不挡服务，改为“能写、按粘贴才能读”；不能注入的做不到这一步，默认整个挡掉
+    return [d for d in DEVICES if conf.get("block", [] if injected else DEFAULT_BLOCK).count(d)]
+
+
+def clipboard_mode(conf, injected):
+    """off 整个挡掉；paste 能写，你按 ⌘V 或点“粘贴”时才能读（要注入）；on 随便读写。"""
+    if "clipboard" in blocked_devices(conf, injected):
+        return "off"
+    return "paste" if injected and conf.get("clipboard_read", "paste") == "paste" else "on"
+
+
+def set_clipboard(bundle_id, mode):
+    set_block(bundle_id, "clipboard", mode == "off")
+    if mode != "off":
+        set_field(bundle_id, "clipboard_read", "paste" if mode == "paste" else "always")
 
 
 def set_location(bundle_id, args):
@@ -371,24 +393,36 @@ def common_rules(rule, conf, mode="space"):
         L += [";; 挡住目录服务，软件查不到真实用户名",
               "(deny mach-lookup", *[f"  (global-name {q(x)})" for x in DIRECTORY_SERVICES], ")"]
     if not opt(rule, conf, "keep_identity"):
-        L += [";; 挡住序列号、硬件 UUID、网卡地址",
-              "(deny iokit-get-properties (with errno 2) (iokit-property " + " ".join(q(x) for x in HARDWARE_IDS) + "))"]
+        ids = HARDWARE_IDS + ([] if conf.get("inject") else DEVICE_IDS)
+        L += [";; 挡住序列号、硬件 UUID、网卡地址等能认出这台 Mac 的值",
+              "(deny iokit-get-properties (with errno 2) (iokit-property " + " ".join(q(x) for x in ids) + "))"]
+        if not conf.get("inject"):
+            # 开机时间、本次开机编号、磁盘服务给的分区 UUID 也能对上号；能注入的换成假的，不能注入的挡掉
+            L += ['(deny sysctl-read (sysctl-name "kern.bootsessionuuid") (sysctl-name "kern.boottime"))',
+                  '(deny mach-lookup (global-name "com.apple.DiskArbitration.diskarbitrationd"))']
     if not conf.get("allow_open"):
         # 经系统拉起的软件不在结界里，挡住它就挡住了借别的软件逃出去的路；代价是不能用浏览器打开链接
         L += [";; 不许拉起其他软件、不许给其他软件发自动化指令", "(deny lsopen)", "(deny appleevent-send)"]
     # 运行中的软件列表来自 launchservicesd，挡住它图形软件就启动不了，所以只挡进程信息
     if not opt(rule, conf, "allow_procinfo"):
-        L += [";; 看不到其他进程", "(deny process-info* (target others))", "(deny process-info-listpids)"]
+        # 进程表另有一条 sysctl 的路，只挡 process-info 挡不住（实测能列出全部进程和名字）；
+        # 按编号查查得到自己也查得到别人，能注入的由注入库只放行自己，不能注入的整个挡掉
+        procs = ['(sysctl-name "kern.proc.all")', *[f'(sysctl-name-prefix "kern.proc.{x}")' for x in ("uid", "ruid", "pgrp", "tty", "sid")]]
+        procs += [] if conf.get("inject") else ['(sysctl-name-prefix "kern.proc.pid")']
+        L += [";; 看不到其他进程", "(deny process-info* (target others))", "(deny process-info-listpids)",
+              f"(deny sysctl-read {' '.join(procs)})"]
     if not opt(rule, conf, "allow_localhost"):
         # 本机上别的程序开的端口（代理面板、开发服务器、其他软件的本地接口）不让它碰；系统代理的端口留着，不然上不了网。
+        # 它只能连分给它的那组端口：能注入的软件自己开端口时，注入库把端口挪进这组（见 inject.c）。
         # 沙盒规则只能写“任意地址”或“本机”，局域网设备交给 macOS 的“本地网络”权限
-        L += [";; 不许连本机上其他程序的网络端口", '(deny network-outbound (remote ip "localhost:*"))',
-              *[f'(allow network-outbound (remote ip "localhost:{p}"))' for p in proxy_ports()]]
+        start, count = conf.get("ports", (0, 0))
+        L += [";; 不许连本机上其他程序的网络端口，只许连分给它的端口", '(deny network-outbound (remote ip "localhost:*"))',
+              *[f'(allow network-outbound (remote ip "localhost:{p}"))' for p in [*proxy_ports(), *range(start, start + count)]]]
     if opt(rule, conf, "block_keychain") and mode != "space":
         # 原地运行的软件家目录就是你的，没法给它单独的钥匙串，只能整个挡住
         L += [";; 挡住钥匙串，代价是依赖钥匙串的登录会失效",
               '(deny mach-lookup (global-name "com.apple.securityd.xpc") (global-name "com.apple.SecurityServer") (global-name "com.apple.secd.keychain"))']
-    for d in blocked_devices(conf):
+    for d in blocked_devices(conf, conf.get("inject")):
         L += DEVICES[d]
     return L
 
@@ -396,6 +430,31 @@ def common_rules(rule, conf, mode="space"):
 def proxy_ports():
     out = subprocess.run(["scutil", "--proxy"], capture_output=True, text=True).stdout
     return sorted({int(p) for p in re.findall(r"(?:HTTP|HTTPS|SOCKS)Port : (\d+)", out)})
+
+
+PORT_RANGE, PORT_BLOCK = (20000, 40000), 32  # 每个软件分一组端口，各组不重叠
+
+
+def busy_ports():
+    """本机上已经有程序占着的端口（TCP 在监听的、UDP 绑定了的）。"""
+    out = subprocess.run(["netstat", "-an"], capture_output=True, text=True).stdout
+    return {int(m[1]) for line in out.splitlines() if line.startswith(("tcp", "udp")) and ("LISTEN" in line or line.startswith("udp"))
+            for m in [re.search(r"[.:](\d+)\s", line.split(None, 4)[3] + " ")] if m}
+
+
+def port_block(bundle_id):
+    """分给它的端口：沿用上次的；启动前那组里有别的程序在占（它此时没在运行），就换一组。"""
+    data = settings()
+    busy = busy_ports()
+    taken = {tuple(c["ports"])[0] for k, c in data.items() if k != bundle_id and isinstance(c, dict) and c.get("ports")}
+    start = (data.get(bundle_id, {}).get("ports") or [0])[0]
+    if start and not busy & set(range(start, start + PORT_BLOCK)):
+        return start, PORT_BLOCK
+    for s in range(PORT_RANGE[0], PORT_RANGE[1], PORT_BLOCK):
+        if s not in taken and not busy & set(range(s, s + PORT_BLOCK)):
+            set_field(bundle_id, "ports", [s, PORT_BLOCK])
+            return s, PORT_BLOCK
+    return 0, 0
 
 
 def allowed_dirs(conf):
@@ -689,8 +748,8 @@ def now():
 
 def denials(app, start):
     """系统日志里这个软件（含附带的小程序）从 start 起被沙盒拒绝的请求：[(时间, 操作, 对象)]。"""
-    exes = {plistlib.load(open(p, "rb")).get("CFBundleExecutable") for p in Path(app, "Contents").rglob("Info.plist")
-            if p.parent.name == "Contents"}
+    # 按 MacOS 文件夹里的文件认进程：有的辅助程序 Info.plist 不写 CFBundleExecutable（实测微信开发者工具的 Helper）
+    exes = {f.name for d in [Path(app, "Contents/MacOS"), *Path(app, "Contents").rglob("Contents/MacOS")] if d.is_dir() for f in d.iterdir()}
     r = subprocess.run(["/usr/bin/log", "show", "--start", start, "--style", "compact",
                         "--predicate", 'senderImagePath CONTAINS "Sandbox" AND eventMessage CONTAINS " deny("'],
                        capture_output=True, text=True, errors="replace")
@@ -906,6 +965,8 @@ def run(app, learn=False):
         return t(f"{Path(app).stem} 正在运行，请先退出。", f"{Path(app).stem} is already running. Quit it completely first.")
     # 苹果的“系统策略”只许原签名的软件进它的容器，重签的副本进不去，只能用自己的一份数据（实测 EPERM）
     mode = "space" if sandboxed else effective_mode(bundle_id, conf, rule)
+    ports = (0, 0) if learn or opt(rule, conf, "allow_localhost") else port_block(bundle_id)
+    conf = {**conf, "ports": list(ports), "inject": not learn and injectable(app)}
     STATE.mkdir(parents=True, exist_ok=True)
     started = STATE / f"{bundle_id}.started"
     if started.exists():
@@ -951,14 +1012,26 @@ def run(app, learn=False):
         if not opt(rule, conf, "keep_identity"):
             i = identity(bundle_id)
             env.update(KEKKAI_SERIAL=i["serial"], KEKKAI_UUID=i["uuid"], KEKKAI_SEED=i["seed"], KEKKAI_NAME=i["name"])
-        if "KEKKAI_HOME" in env or "KEKKAI_SEED" in env:
+        if ports[1]:
+            # 它要开的端口挪进分给它的那组；挪过的记在这个文件里，它的各个进程连原端口时照着换
+            portmap = Path(env.get("TMPDIR", "/private/tmp/"), ".kekkai-ports")
+            portmap.parent.mkdir(parents=True, exist_ok=True)
+            portmap.write_text("")
+            env.update(KEKKAI_PORTS=f"{ports[0]}:{ports[1]}", KEKKAI_PORTMAP=str(portmap))
+        if clipboard_mode(conf, True) == "paste":
+            env["KEKKAI_PASTE"] = "1"
+        if not opt(rule, conf, "allow_procinfo"):
+            env["KEKKAI_PROCS"] = "1"
+        if "KEKKAI_HOME" in env or "KEKKAI_SEED" in env or "KEKKAI_PORTS" in env or "KEKKAI_PASTE" in env or "KEKKAI_PROCS" in env:
             libs.append("libkekkai.dylib")
     if fake:
         libs.append("libfakeloc.dylib")
         env.update(KEKKAI_LAT=str(fake["lat"]), KEKKAI_LON=str(fake["lon"]))
     LIBDIR.mkdir(parents=True, exist_ok=True)
     for name in libs:
-        shutil.copy(ROOT / name, LIBDIR / name)
+        # 先写新文件再替换：原地覆盖已签名的库，系统会按旧的签名缓存把加载它的进程杀掉（实测 OS_REASON_CODESIGNING）
+        shutil.copy(ROOT / name, LIBDIR / f".{name}.new")
+        os.replace(LIBDIR / f".{name}.new", LIBDIR / name)
     args = ["/usr/bin/sandbox-exec", "-f", str(sb), binary]
     if libs:  # 系统程序会丢掉 DYLD_ 变量，经 env 在最后一步交给软件
         args[3:3] = ["/usr/bin/env", "DYLD_INSERT_LIBRARIES=" + ":".join(str(LIBDIR / n) for n in libs)]
@@ -1079,16 +1152,25 @@ def add(app, wait=20):
     if (STATE / f"{bundle_id}.stopped").exists():
         return result(False, t("试运行已停止，未添加。", "The trial run was stopped, so it wasn't added."))
     s = log_status(app, bundle_id, {})
-    if s["receipt"]:
-        return result(False, t("该软件为 App Store 版本，启动时校验购买凭证，结界副本无法通过校验。",
-                               "It's an App Store app that checks its purchase receipt, which the Kekkai copy can't pass."))
-    if s["gatekeeper"]:
-        return result(False, t("macOS 已阻止该软件运行（未经 Apple 公证）。请先在结界外打开一次，并在“隐私与安全性”中允许后重试。",
-                               "macOS blocked this unnotarized app. Open it once outside Kekkai, allow it in Privacy & Security, then add it again."))
-    detail = "\n".join(s["errors"][:2])
-    return result(False, t(f"软件在结界中启动后退出（退出码 {s['exitCode']}），开启全部权限后仍无法运行。", f"It quit on its own after starting in Kekkai (exit code {s['exitCode']}), even with every permission on.")
-                  + ("\n" + detail if detail else ""))
+    return result(False, failure_reason(bundle_id, s))
 
+
+def failure_reason(bundle_id, s):
+    """试运行失败的原因，一句话：能分清的说清楚，分不清的照实说退出码。"""
+    out = subprocess.run(["launchctl", "print", f"gui/{UID}/{label(bundle_id)}"], capture_output=True, text=True).stdout
+    signal = re.search(r"last terminating signal = ([^\n]+)", out)
+    if s["receipt"]:
+        return t("App Store 付费软件会校验购买凭证，结界里的副本通不过。", "Paid App Store apps check their purchase receipt, and the copy in Kekkai can't pass it.")
+    if s["gatekeeper"]:
+        return t("未经 Apple 公证，macOS 拦下了它。先在结界外打开一次并允许，再添加。",
+                 "macOS blocked it because it isn't notarized. Open it once outside Kekkai and allow it, then add it again.")
+    if s["exitCode"] == "OS_REASON_CODESIGNING":
+        return t("代码签名校验未通过，macOS 不许它在结界里运行。", "It failed a code signature check, so macOS won't run it in Kekkai.")
+    if signal:
+        return t(f"启动后崩溃（{signal[1].strip()}），打开全部权限也一样。", f"It crashed after starting ({signal[1].strip()}), even with every permission on.")
+    detail = s["errors"][0] if s["errors"] else ""
+    return (t(f"启动后自行退出（退出码 {s['exitCode']}），打开全部权限也一样。", f"It quit on its own (exit code {s['exitCode']}), even with every permission on.")
+            + ("\n" + detail if detail else ""))
 
 def remove(app):
     """从列表里拿掉；它的结界文件夹和设置留着，以后再添加接着用。"""
@@ -1146,13 +1228,15 @@ def list_apps():
                 e = entitlements(str(app))
                 cache[key] = {"sandboxed": bool(e.get("com.apple.security.app-sandbox")),
                               "perm_keys": [k for k in PERMISSIONS if e.get(k)]}
+            if "inj" not in cache[key]:  # 自带苹果沙盒的软件跑的是重签的副本，副本能注入
+                cache[key]["inj"] = cache[key]["sandboxed"] or injectable(str(app))
             inside = any(label(bundle_id) == ln.split("\t")[-1] and not ln.startswith("-") for ln in jobs.splitlines())
             c = conf.get(bundle_id, {})
             space = space_of(bundle_id)
             out.append({"id": bundle_id, "name": app.stem, "path": str(app), "sandboxed": cache[key]["sandboxed"],
                         "perms": [t(PERMISSIONS[k], PERMISSIONS_EN[k]) for k in cache[key]["perm_keys"]], "inside": inside, "running": f"{app}/Contents/MacOS/{exe}" in procs,
                         "tz": c.get("tz"), "mode": effective_mode(bundle_id, c, load_rule(bundle_id)),
-                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c), "location": c.get("location"), "identity": c.get("identity"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "options": {k: opt(load_rule(bundle_id), c, v) for k, v in OPTIONS.items()}, "autoEnabled": c.get("auto_enabled", []), "tuned": bool(c.get("tuned")), "reviewed": bool(c.get("decided")), "space": str(space), "hasSpace": space.exists(), "added": str(app) in added})
+                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c, cache[key]["inj"]), "clipboard": clipboard_mode(c, cache[key]["inj"]), "injectable": cache[key]["inj"], "location": c.get("location"), "identity": c.get("identity"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "options": {k: opt(load_rule(bundle_id), c, v) for k, v in OPTIONS.items()}, "autoEnabled": c.get("auto_enabled", []), "tuned": bool(c.get("tuned")), "reviewed": bool(c.get("decided")), "space": str(space), "hasSpace": space.exists(), "added": str(app) in added})
     if "_added" not in conf:  # 有“添加”之前就在结界里用过的软件，直接算已添加
         conf["_added"] = sorted(e["path"] for e in out if e["hasSpace"] or e["id"] in conf)
         save_settings(conf)
@@ -1198,6 +1282,8 @@ def main():
         return set_field(a[1], "allow_open", True if a[2] == "on" else "-")
     if len(a) == 4 and a[0] == "set-block" and a[2] in DEVICES and a[3] in ("on", "off"):
         return set_block(a[1], a[2], a[3] == "on")
+    if len(a) == 3 and a[0] == "set-clipboard" and a[2] in ("off", "paste", "on"):
+        return set_clipboard(a[1], a[2])
     if a[:1] == ["never"] and (a[1:] == ["list"] or (len(a) == 3 and a[1] in ("add", "rm"))):
         return never_cmd(*a[1:])
     if len(a) >= 4 and a[0] == "decide" and a[2] in ("allow", "deny"):

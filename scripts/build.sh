@@ -8,7 +8,7 @@ rm -rf "$app"; mkdir -p "$app/Contents/MacOS" "$sup"
 swiftc -O -parse-as-library -o "$app/Contents/MacOS/Kekkai" "$src/Sources/Kekkai.swift"
 clang -dynamiclib -fobjc-arc -Wno-deprecated-declarations -arch arm64 -arch x86_64 -framework Foundation -framework CoreLocation \
   "$src/Sources/fakeloc.m" -o "$sup/libfakeloc.dylib"
-clang -dynamiclib -arch arm64 -arch x86_64 -framework CoreFoundation -framework IOKit -framework SystemConfiguration \
+clang -dynamiclib -arch arm64 -arch x86_64 -framework CoreFoundation -framework IOKit -framework SystemConfiguration -framework DiskArbitration -framework CoreGraphics -lobjc \
   "$src/Sources/inject.c" -o "$sup/libkekkai.dylib"
 cp "$src/kekkai" "$sup/kekkai"; cp -R "$src/rules" "$sup/rules"
 # 内容变了才重装支持文件：用支持文件本身的哈希作版本

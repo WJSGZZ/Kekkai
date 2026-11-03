@@ -2,12 +2,18 @@
 // 假用户：问“我是谁、家在哪”时答 user 和结界文件夹，系统那边的查询照旧被挡。
 // 假设备：序列号、硬件 UUID、网卡地址、电脑名换成结界给这个软件的一套，机型、系统版本这类不唯一的不改。
 // 软件开新进程时常把环境变量整个换掉，这里把注入和这些设置补回去，子进程也拿到同样的答案。
+// 端口：它开的 TCP 端口挪进结界分给它的那组，沙盒只许它连这组，所以连得上自己的、连不上别人的。
+// 剪贴板：可以写；读内容只在你按 ⌘V 或点“粘贴”后的一会儿放行。
+// 进程：别的程序一律“没有这个进程”，列表里只有它自己，像一台什么都没开的 Mac。
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <SystemConfiguration/SystemConfiguration.h>
+#include <DiskArbitration/DiskArbitration.h>
+#include <CoreGraphics/CoreGraphics.h>
 #include <ifaddrs.h>
 #include <net/if_dl.h>
 #include <sys/sysctl.h>
+#include <net/route.h>
 #include <sys/utsname.h>
 #include <pwd.h>
 #include <spawn.h>
@@ -15,16 +21,117 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <libproc.h>
+#include <dlfcn.h>
+#include <time.h>
+#include <objc/runtime.h>
+#include <objc/message.h>
+#include <ctype.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
 #define INTERPOSE(mine, theirs) \
     __attribute__((used)) static struct { const void *a, *b; } _i_##theirs \
     __attribute__((section("__DATA,__interpose"))) = { (const void *)(mine), (const void *)(theirs) };
 
 static const char *carry[] = {"HOME", "DYLD_INSERT_LIBRARIES", "KEKKAI_HOME", "KEKKAI_LAT", "KEKKAI_LON",
-                              "KEKKAI_SERIAL", "KEKKAI_UUID", "KEKKAI_NAME", "KEKKAI_SEED", NULL};
+                              "KEKKAI_SERIAL", "KEKKAI_UUID", "KEKKAI_NAME", "KEKKAI_SEED",
+                              "KEKKAI_PORTS", "KEKKAI_PORTMAP", "KEKKAI_PASTE", "KEKKAI_PROCS", NULL};
 static char *saved[sizeof carry / sizeof *carry];  // 启动时记下的 "名字=值"
-static char *home, *serial, *uuid, *name, *seed;
+static char *home, *serial, *uuid, *name, *seed, *portmap;
+static int pstart, pcount;  // 分给它的端口：pstart 起 pcount 个
+static int hide_procs;
 static struct passwd fake;
+
+// ---- 剪贴板 ----
+
+static double paste_until;  // 这个时刻之前读剪贴板放行
+static CFStringRef general;  // 通用剪贴板的名字；拖放用的是另一块，不管
+
+static double now_s(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
+
+static int may_read(id pb) {
+    if (now_s() < paste_until || !general) return 1;
+    CFTypeRef n = ((id (*)(id, SEL))objc_msgSend)(pb, sel_registerName("name"));
+    return !n || !CFEqual(n, general);
+}
+
+static int text_is(id s, const char *want) {
+    char b[64];
+    return s && CFStringGetCString((CFStringRef)s, b, sizeof b, kCFStringEncodingUTF8) && !strcmp(b, want);
+}
+
+static int text_has(id s, const char *part) {
+    char b[256];
+    return s && CFStringGetCString((CFStringRef)s, b, sizeof b, kCFStringEncodingUTF8) && strstr(b, part);
+}
+
+static IMP orig_data, orig_string, orig_plist, orig_objects, orig_items, orig_file, orig_wrapper, orig_event, orig_action;
+
+static id g_data(id self, SEL s, id type) { return may_read(self) ? ((id (*)(id, SEL, id))orig_data)(self, s, type) : nil; }
+static id g_string(id self, SEL s, id type) { return may_read(self) ? ((id (*)(id, SEL, id))orig_string)(self, s, type) : nil; }
+static id g_plist(id self, SEL s, id type) { return may_read(self) ? ((id (*)(id, SEL, id))orig_plist)(self, s, type) : nil; }
+static id g_objects(id self, SEL s, id cls, id opt) {
+    return may_read(self) ? ((id (*)(id, SEL, id, id))orig_objects)(self, s, cls, opt) : nil;
+}
+static id g_items(id self, SEL s) { return may_read(self) ? ((id (*)(id, SEL))orig_items)(self, s) : nil; }
+static id g_file(id self, SEL s, id type, id path) {
+    return may_read(self) ? ((id (*)(id, SEL, id, id))orig_file)(self, s, type, path) : nil;
+}
+static id g_wrapper(id self, SEL s) { return may_read(self) ? ((id (*)(id, SEL))orig_wrapper)(self, s) : nil; }
+
+// ⌘V：按键先经过 sendEvent:，菜单的快捷键也在这之后才处理
+static void g_event(id self, SEL s, id e) {
+    unsigned long type = ((unsigned long (*)(id, SEL))objc_msgSend)(e, sel_registerName("type"));
+    if (type == 10) {  // 按下键
+        unsigned long flags = ((unsigned long (*)(id, SEL))objc_msgSend)(e, sel_registerName("modifierFlags"));
+        id chars = ((id (*)(id, SEL))objc_msgSend)(e, sel_registerName("charactersIgnoringModifiers"));
+        if ((flags & (1ul << 20)) && (text_is(chars, "v") || text_is(chars, "V"))) paste_until = now_s() + 1.5;
+    }
+    ((void (*)(id, SEL, id))orig_event)(self, s, e);
+}
+
+// 点菜单或右键菜单里的“粘贴”：动作名是 paste 开头的，或者菜单项是 ⌘V、叫“粘贴”
+static BOOL g_action(id self, SEL s, SEL action, id to, id from) {
+    const char *a = action ? sel_getName(action) : "";
+    int paste = !strncmp(a, "paste", 5);
+    if (!paste && from && objc_getClass("NSMenuItem") &&
+        ((BOOL (*)(id, SEL, Class))objc_msgSend)(from, sel_registerName("isKindOfClass:"), objc_getClass("NSMenuItem"))) {
+        id key = ((id (*)(id, SEL))objc_msgSend)(from, sel_registerName("keyEquivalent"));
+        unsigned long mask = ((unsigned long (*)(id, SEL))objc_msgSend)(from, sel_registerName("keyEquivalentModifierMask"));
+        id title = ((id (*)(id, SEL))objc_msgSend)(from, sel_registerName("title"));
+        paste = (text_is(key, "v") && (mask & (1ul << 20))) || text_has(title, "粘贴") || text_has(title, "Paste");
+    }
+    if (paste) paste_until = now_s() + 1.5;
+    return ((BOOL (*)(id, SEL, SEL, id, id))orig_action)(self, s, action, to, from);
+}
+
+static void hook(const char *cls, const char *sel, IMP mine, IMP *orig) {
+    Class c = objc_getClass(cls);
+    Method m = c ? class_getInstanceMethod(c, sel_registerName(sel)) : NULL;
+    if (m) *orig = method_setImplementation(m, mine);
+}
+
+static void guard_clipboard(void) {
+    if (!objc_getClass("NSPasteboard") || !objc_getClass("NSApplication")) return;  // 没有界面的进程碰不到剪贴板
+    id *g = dlsym(RTLD_DEFAULT, "NSPasteboardNameGeneral");
+    general = g && *g ? CFRetain((CFTypeRef)*g) : NULL;
+    hook("NSPasteboard", "dataForType:", (IMP)g_data, &orig_data);
+    hook("NSPasteboard", "stringForType:", (IMP)g_string, &orig_string);
+    hook("NSPasteboard", "propertyListForType:", (IMP)g_plist, &orig_plist);
+    hook("NSPasteboard", "readObjectsForClasses:options:", (IMP)g_objects, &orig_objects);
+    hook("NSPasteboard", "pasteboardItems", (IMP)g_items, &orig_items);
+    hook("NSPasteboard", "readFileContentsType:toFile:", (IMP)g_file, &orig_file);
+    hook("NSPasteboard", "readFileWrapper", (IMP)g_wrapper, &orig_wrapper);
+    hook("NSApplication", "sendEvent:", (IMP)g_event, &orig_event);
+    hook("NSApplication", "sendAction:to:from:", (IMP)g_action, &orig_action);
+}
 
 __attribute__((constructor)) static void setup(void) {
     for (int i = 0; carry[i]; i++) {
@@ -39,6 +146,10 @@ __attribute__((constructor)) static void setup(void) {
     if ((v = getenv("KEKKAI_UUID"))) uuid = strdup(v);
     if ((v = getenv("KEKKAI_NAME"))) name = strdup(v);
     if ((v = getenv("KEKKAI_SEED"))) seed = strdup(v);
+    if ((v = getenv("KEKKAI_PORTS")) && sscanf(v, "%d:%d", &pstart, &pcount) != 2) pcount = 0;
+    if ((v = getenv("KEKKAI_PORTMAP"))) portmap = strdup(v);
+    if (getenv("KEKKAI_PASTE")) guard_clipboard();
+    hide_procs = getenv("KEKKAI_PROCS") != NULL;
     const char *h = getenv("KEKKAI_HOME");
     if (!h) return;
     home = strdup(h);
@@ -129,6 +240,156 @@ INTERPOSE(my_execve, execve)
 INTERPOSE(my_posix_spawn, posix_spawn)
 INTERPOSE(my_posix_spawnp, posix_spawnp)
 
+// ---- 端口 ----
+
+static int ours(int port) { return port >= pstart && port < pstart + pcount; }
+
+static int port_of(const struct sockaddr *a) {
+    return ntohs(a->sa_family == AF_INET ? ((struct sockaddr_in *)a)->sin_port : ((struct sockaddr_in6 *)a)->sin6_port);
+}
+
+static void set_port(struct sockaddr *a, int port) {
+    if (a->sa_family == AF_INET) ((struct sockaddr_in *)a)->sin_port = htons(port);
+    else ((struct sockaddr_in6 *)a)->sin6_port = htons(port);
+}
+
+static int inet(const struct sockaddr *a, socklen_t len) {
+    return a && ((a->sa_family == AF_INET && len >= sizeof(struct sockaddr_in)) ||
+                 (a->sa_family == AF_INET6 && len >= sizeof(struct sockaddr_in6)));
+}
+
+static int loopback(const struct sockaddr *a) {
+    if (a->sa_family == AF_INET) return (ntohl(((struct sockaddr_in *)a)->sin_addr.s_addr) >> 24) == 127;
+    const struct in6_addr *x = &((struct sockaddr_in6 *)a)->sin6_addr;
+    return IN6_IS_ADDR_LOOPBACK(x) || (IN6_IS_ADDR_V4MAPPED(x) && x->s6_addr[12] == 127);
+}
+
+// 记录文件每行“原端口 实际端口”，后写的算数；各进程共用
+static int mapped(int port) {
+    int fd = portmap ? open(portmap, O_RDONLY) : -1, found = 0;
+    if (fd < 0) return 0;
+    char buf[8192];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    for (char *line = buf; line && *line; line = strchr(line, '\n'), line = line ? line + 1 : NULL) {
+        int from, to;
+        if (sscanf(line, "%d %d", &from, &to) == 2 && from == port) found = to;
+    }
+    return found;
+}
+
+static void remember(int from, int to) {
+    int fd = portmap ? open(portmap, O_WRONLY | O_APPEND | O_CREAT, 0600) : -1;
+    if (fd < 0) return;
+    char line[32];
+    write(fd, line, snprintf(line, sizeof line, "%d %d\n", from, to));
+    close(fd);
+}
+
+static int my_bind(int fd, const struct sockaddr *addr, socklen_t len) {
+    int type = 0;
+    socklen_t tl = sizeof type;
+    if (!pcount || !inet(addr, len) || getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &tl) || type != SOCK_STREAM ||
+        ours(port_of(addr)))
+        return bind(fd, addr, len);
+    struct sockaddr_storage a;
+    memcpy(&a, addr, len);
+    int want = port_of(addr), before = want ? mapped(want) : 0;
+    if (before) {  // 已经挪过：只用原来那个，占着就照实说占着（别的进程靠这个判断自己是不是第二个）
+        set_port((struct sockaddr *)&a, before);
+        return bind(fd, (struct sockaddr *)&a, len);
+    }
+    for (int i = 0; i < pcount; i++) {
+        int port = pstart + (want + i) % pcount;
+        set_port((struct sockaddr *)&a, port);
+        if (bind(fd, (struct sockaddr *)&a, len) == 0) {
+            if (want) remember(want, port);
+            return 0;
+        }
+        if (errno != EADDRINUSE) return -1;
+    }
+    errno = EADDRINUSE;
+    return -1;
+}
+
+static int my_connect(int fd, const struct sockaddr *addr, socklen_t len) {
+    int to;
+    if (!pcount || !inet(addr, len) || !loopback(addr) || ours(port_of(addr)) || !(to = mapped(port_of(addr))))
+        return connect(fd, addr, len);
+    struct sockaddr_storage a;
+    memcpy(&a, addr, len);
+    set_port((struct sockaddr *)&a, to);
+    return connect(fd, (struct sockaddr *)&a, len);
+}
+
+INTERPOSE(my_bind, bind)
+INTERPOSE(my_connect, connect)
+
+// ---- 进程 ----
+
+// 是它自己或它开的子进程
+static int family(pid_t pid) {
+    if (pid == getpid()) return 1;
+    struct kinfo_proc k;
+    size_t n = sizeof k;
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+    return !sysctl(mib, 4, &k, &n, NULL, 0) && n && k.kp_eproc.e_ppid == getpid();
+}
+
+static int my_proc_listpids(uint32_t type, uint32_t info, void *buf, int size) {
+    if (!hide_procs) return proc_listpids(type, info, buf, size);
+    if (!buf) return sizeof(pid_t);
+    if (size < (int)sizeof(pid_t)) return 0;
+    *(pid_t *)buf = getpid();
+    return sizeof(pid_t);
+}
+
+static int my_proc_listallpids(void *buf, int size) {
+    if (!hide_procs) return proc_listallpids(buf, size);
+    if (buf && size >= (int)sizeof(pid_t)) *(pid_t *)buf = getpid();
+    return 1;
+}
+
+// 查别人：系统沙盒答“没有权限”，换成“没有这个进程”
+#define ALIEN(call) do { int r_ = (call); if (hide_procs && r_ <= 0 && errno == EPERM) errno = ESRCH; return r_; } while (0)
+static int my_proc_pidinfo(int pid, int flavor, uint64_t arg, void *buf, int size) {
+    if (hide_procs && !family(pid)) { errno = ESRCH; return 0; }
+    ALIEN(proc_pidinfo(pid, flavor, arg, buf, size));
+}
+static int my_proc_pidpath(int pid, void *buf, uint32_t size) {
+    if (hide_procs && !family(pid)) { errno = ESRCH; return 0; }
+    ALIEN(proc_pidpath(pid, buf, size));
+}
+static int my_proc_name(int pid, void *buf, uint32_t size) {
+    if (hide_procs && !family(pid)) { errno = ESRCH; return 0; }
+    ALIEN(proc_name(pid, buf, size));
+}
+
+// sysctl 的进程表：整份列表只给它自己那一条；按编号查别人当作没有
+static int proc_table(int *mib, u_int len) { return hide_procs && len >= 3 && mib[0] == CTL_KERN && mib[1] == KERN_PROC; }
+
+static int fake_proc_table(int *mib, u_int len, void *old, size_t *oldlen) {
+    if (len >= 4 && mib[2] == KERN_PROC_PID) {
+        if (family(mib[3])) return sysctl(mib, len, old, oldlen, NULL, 0);
+        *oldlen = 0;
+        return 0;
+    }
+    if (mib[2] == KERN_PROC_ALL || mib[2] == KERN_PROC_UID || mib[2] == KERN_PROC_RUID || mib[2] == KERN_PROC_PGRP ||
+        mib[2] == KERN_PROC_SESSION || mib[2] == KERN_PROC_TTY) {
+        int self[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+        return sysctl(self, 4, old, oldlen, NULL, 0);
+    }
+    return sysctl(mib, len, old, oldlen, NULL, 0);
+}
+
+INTERPOSE(my_proc_listpids, proc_listpids)
+INTERPOSE(my_proc_listallpids, proc_listallpids)
+INTERPOSE(my_proc_pidinfo, proc_pidinfo)
+INTERPOSE(my_proc_pidpath, proc_pidpath)
+INTERPOSE(my_proc_name, proc_name)
+
 // ---- 假设备 ----
 
 // 网卡地址：前三字节是厂商号，保留（看起来仍是苹果的网卡）；后三字节按这个软件的种子换掉，每块网卡各不相同
@@ -156,6 +417,86 @@ static int is(CFStringRef key, const char *s) {
     return key && CFStringGetCString(key, buf, sizeof buf, kCFStringEncodingUTF8) && !strcmp(buf, s);
 }
 
+// 其余能认出这台 Mac 的值（磁盘、电池、蓝牙、芯片、触控板等的序列号和 UUID）：按种子和原值换一个同样格式的，
+// 同一个原值在这个软件里永远换成同一个，各软件之间不同
+static const char *morphed[] = {"UUID", "VolGroupUUID", "SerialNumber", "Serial", "ECID", "ecid", "unique-chip-id",
+                                "BD_ADDR", "local-mac-address", "mac-address", "USB Serial Number", "kUSBSerialNumberString", NULL};
+// 里面夹着序列号的整块数据，直接当没有
+static const char *dropped[] = {"BatteryData", "EDID", "IODisplayEDID", "IODisplayEDIDOriginal", "DisplayAttributes", NULL};
+
+static int listed(CFStringRef key, const char **list) {
+    for (int i = 0; list[i]; i++) if (is(key, list[i])) return 1;
+    return 0;
+}
+
+static uint64_t mix(uint64_t h, const void *p, size_t n) {
+    for (size_t i = 0; i < n; i++) h = (h ^ ((const unsigned char *)p)[i]) * 1099511628211ull;
+    return h;
+}
+
+static uint64_t seeded(const void *p, size_t n) { return mix(mix(14695981039346656037ull, seed, strlen(seed)), p, n); }
+
+// 打散：FNV 的低位只取决于输入的低位，逐位取值前要先打散
+static uint64_t scramble(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ull;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+    return x ^ (x >> 31);
+}
+
+// 字符串逐位换：数字换数字，字母换字母，像十六进制的只用十六进制字符，大小写跟原值走，分隔符不动
+static void morph_chars(char *s) {
+    int hex = 1, lower = 0;
+    for (char *c = s; *c; c++) {
+        hex &= isxdigit((unsigned char)*c) || *c == '-' || *c == ':';
+        lower |= islower((unsigned char)*c);
+    }
+    uint64_t h = seeded(s, strlen(s));
+    for (size_t i = 0; s[i]; i++) {
+        uint64_t r = scramble(h + i) >> 8;
+        unsigned char c = s[i];
+        if (hex && isxdigit(c)) s[i] = (lower ? "0123456789abcdef" : "0123456789ABCDEF")[r % 16];
+        else if (isdigit(c)) s[i] = '0' + r % 10;
+        else if (isupper(c)) s[i] = 'A' + r % 26;
+        else if (islower(c)) s[i] = 'a' + r % 26;
+    }
+}
+
+static CFTypeRef morph(CFTypeRef v) {
+    if (!v || !seed) return NULL;
+    CFTypeID t = CFGetTypeID(v);
+    if (t == CFStringGetTypeID()) {
+        char b[256];
+        if (!CFStringGetCString(v, b, sizeof b, kCFStringEncodingUTF8)) return NULL;
+        morph_chars(b);
+        return str(b);
+    }
+    if (t == CFDataGetTypeID()) {
+        CFIndex n = CFDataGetLength(v);
+        UInt8 *b = malloc(n ? n : 1);
+        CFDataGetBytes(v, CFRangeMake(0, n), b);
+        if (n == 6) fake_mac(b);  // 网卡、蓝牙地址：和 getifaddrs 换的一致
+        else {
+            uint64_t h = seeded(b, n);
+            for (CFIndex i = 0; i < n; i++) if (b[i]) b[i] = scramble(h + i) >> 24;
+        }
+        CFDataRef d = CFDataCreate(NULL, b, n);
+        free(b);
+        return d;
+    }
+    if (t == CFNumberGetTypeID()) {
+        int64_t x = 0;
+        CFNumberGetValue(v, kCFNumberSInt64Type, &x);
+        if (!x) return CFRetain(v);
+        uint64_t m = 1;  // 位数不变：int64 最多 19 位，m 最大 1e19，放得进 uint64
+        for (uint64_t y = x < 0 ? -(uint64_t)x : (uint64_t)x; y; y /= 10) m *= 10;
+        uint64_t low = m / 10, top = m > (uint64_t)INT64_MAX ? (uint64_t)INT64_MAX : m;
+        int64_t r = (int64_t)(low + scramble(seeded(&x, sizeof x)) % (top - low));
+        return CFNumberCreate(NULL, kCFNumberSInt64Type, &r);
+    }
+    return NULL;
+}
+
 // 有假值就返回新对象（调用方负责释放），否则 NULL
 static CFTypeRef replacement(CFStringRef key, CFTypeRef orig) {
     if (serial && is(key, "IOPlatformSerialNumber")) return str(serial);
@@ -168,12 +509,13 @@ static CFTypeRef replacement(CFStringRef key, CFTypeRef orig) {
         fake_mac(mac);
         return CFDataCreate(NULL, mac, 6);
     }
+    if (listed(key, morphed)) return morph(orig);
     return NULL;
 }
 
 static int sensitive(CFStringRef key) {
     return is(key, "IOPlatformSerialNumber") || is(key, "IOPlatformUUID") || is(key, "serial-number") ||
-           is(key, "mlb-serial-number") || is(key, "IOMACAddress");
+           is(key, "mlb-serial-number") || is(key, "IOMACAddress") || listed(key, morphed) || listed(key, dropped);
 }
 
 static CFTypeRef my_IORegistryEntryCreateCFProperty(io_registry_entry_t e, CFStringRef key, CFAllocatorRef a, IOOptionBits o) {
@@ -220,6 +562,54 @@ static kern_return_t my_IORegistryEntryCreateCFProperties(io_registry_entry_t e,
     }
     return kr;
 }
+
+// 老接口按字节取属性：敏感的一律当没有（照格式换要知道类型，这个接口不给）
+static kern_return_t my_IORegistryEntryGetProperty(io_registry_entry_t e, const io_name_t key, io_struct_inband_t buf, uint32_t *size) {
+    CFStringRef k = str(key);
+    int hide = seed && sensitive(k);
+    CFRelease(k);
+    return hide ? kIOReturnNotFound : IORegistryEntryGetProperty(e, key, buf, size);
+}
+
+// 磁盘服务给的分区、卷宗 UUID：和设备树里换的是同一套
+static void morph_uuid(CFMutableDictionaryRef d, CFStringRef key) {
+    CFUUIDRef u = CFDictionaryGetValue(d, key);
+    if (!u || CFGetTypeID(u) != CFUUIDGetTypeID()) return;
+    CFStringRef s = CFUUIDCreateString(NULL, u);
+    CFStringRef m = morph(s);
+    CFUUIDRef n = m ? CFUUIDCreateFromString(NULL, m) : NULL;
+    if (n) { CFDictionarySetValue(d, key, n); CFRelease(n); }
+    else CFDictionaryRemoveValue(d, key);
+    CFRelease(s);
+    if (m) CFRelease(m);
+}
+
+static CFDictionaryRef my_DADiskCopyDescription(DADiskRef disk) {
+    CFDictionaryRef d = DADiskCopyDescription(disk);
+    if (!d || !seed) return d;
+    CFMutableDictionaryRef m = CFDictionaryCreateMutableCopy(NULL, 0, d);
+    CFRelease(d);
+    morph_uuid(m, kDADiskDescriptionVolumeUUIDKey);
+    morph_uuid(m, kDADiskDescriptionMediaUUIDKey);
+    CFDictionaryRemoveValue(m, kDADiskDescriptionDeviceGUIDKey);
+    CFStringRef sn = CFStringCreateWithCString(NULL, "DADeviceSerialNumber", kCFStringEncodingUTF8);  // 外接盘有
+    CFDictionaryRemoveValue(m, sn);
+    CFRelease(sn);
+    return m;
+}
+
+static uint32_t my_CGDisplaySerialNumber(CGDirectDisplayID d) {
+    uint32_t v = CGDisplaySerialNumber(d);
+    return v && seed ? (uint32_t)scramble(seeded(&v, sizeof v)) : v;
+}
+
+// 开机时间往前挪 0～6 小时、本次开机编号换掉：每次开机都变，各软件挪的量不同，对不上
+static void fake_boottime(struct timeval *tv) {
+    time_t real = tv->tv_sec;
+    tv->tv_sec = real - (time_t)(scramble(seeded(&real, sizeof real)) % 21600);
+}
+
+static void fake_bootsession(char *s) { morph_chars(s); }
 
 static int my_gethostuuid(uuid_t id, const struct timespec *wait) {
     if (!uuid) return gethostuuid(id, wait);
@@ -275,14 +665,47 @@ static int fill_hostname(void *old, size_t *oldlen) {
     return 0;
 }
 
+// 路由表里带硬件地址的条目（ARP、IPv6 邻居）：有路由器和局域网里别的设备的网卡地址，等于说出了你在哪个网络。
+// 删掉这些条目，其余照给；要大小的那一次也照删后的算，前后对得上
+static void drop_neighbors(void *buf, size_t *len) {
+    char *p = buf, *end = p + *len, *out = p;
+    while (p + sizeof(struct rt_msghdr) <= end) {
+        struct rt_msghdr *m = (struct rt_msghdr *)p;
+        size_t n = m->rtm_msglen;  // 先记下：往前挪会盖住这条的头
+        if (!n || p + n > end) break;
+        if (!(m->rtm_flags & RTF_LLINFO)) { memmove(out, p, n); out += n; }
+        p += n;
+    }
+    *len = out - (char *)buf;
+}
+
+static int route_table(int *mib, u_int len) { return seed && len >= 6 && mib[0] == CTL_NET && mib[1] == PF_ROUTE; }
+
 static int my_sysctl(int *mib, u_int len, void *old, size_t *oldlen, void *new, size_t newlen) {
     if (name && len == 2 && mib[0] == CTL_KERN && mib[1] == KERN_HOSTNAME && !new && oldlen) return fill_hostname(old, oldlen);
-    return sysctl(mib, len, old, oldlen, new, newlen);
+    if (proc_table(mib, len) && oldlen && !new) return fake_proc_table(mib, len, old, oldlen);
+    if (route_table(mib, len) && oldlen && !new) {
+        if (old) {
+            int r = sysctl(mib, len, old, oldlen, NULL, 0);
+            if (!r) drop_neighbors(old, oldlen);
+            return r;
+        }
+        return sysctl(mib, len, NULL, oldlen, NULL, 0);  // 只问大小：给原大小，够装
+    }
+    int r = sysctl(mib, len, old, oldlen, new, newlen);
+    if (!r && seed && len == 2 && mib[0] == CTL_KERN && mib[1] == KERN_BOOTTIME && old && oldlen && *oldlen >= sizeof(struct timeval))
+        fake_boottime(old);
+    return r;
 }
 
 static int my_sysctlbyname(const char *n, void *old, size_t *oldlen, void *new, size_t newlen) {
     if (name && n && !strcmp(n, "kern.hostname") && !new && oldlen) return fill_hostname(old, oldlen);
-    return sysctlbyname(n, old, oldlen, new, newlen);
+    int r = sysctlbyname(n, old, oldlen, new, newlen);
+    if (!r && seed && n && old && oldlen) {
+        if (!strcmp(n, "kern.boottime") && *oldlen >= sizeof(struct timeval)) fake_boottime(old);
+        if (!strcmp(n, "kern.bootsessionuuid") && *oldlen) { ((char *)old)[*oldlen - 1] = 0; fake_bootsession(old); }
+    }
+    return r;
 }
 
 static CFStringRef my_SCDynamicStoreCopyComputerName(SCDynamicStoreRef store, CFStringEncoding *enc) {
@@ -302,6 +725,9 @@ static CFStringRef my_SCDynamicStoreCopyLocalHostName(SCDynamicStoreRef store) {
 INTERPOSE(my_IORegistryEntryCreateCFProperty, IORegistryEntryCreateCFProperty)
 INTERPOSE(my_IORegistryEntrySearchCFProperty, IORegistryEntrySearchCFProperty)
 INTERPOSE(my_IORegistryEntryCreateCFProperties, IORegistryEntryCreateCFProperties)
+INTERPOSE(my_IORegistryEntryGetProperty, IORegistryEntryGetProperty)
+INTERPOSE(my_DADiskCopyDescription, DADiskCopyDescription)
+INTERPOSE(my_CGDisplaySerialNumber, CGDisplaySerialNumber)
 INTERPOSE(my_gethostuuid, gethostuuid)
 INTERPOSE(my_getifaddrs, getifaddrs)
 INTERPOSE(my_gethostname, gethostname)

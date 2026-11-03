@@ -31,8 +31,8 @@
 - **设备身份**：每个软件一套，存在设置里；`new-identity` 重置。`common_rules` 同时用 `iokit-property` 挡住真实硬件号，除非设了 `keep_identity`。
 - **端口配额**：“本机端口”关闭时，`port_block()` 给每个软件分一组 32 个端口（20000–39999 里，各软件不重叠，启动前发现被别的程序占了就换一组，存在设置的 `ports`），沙盒只许它在本机连这组和系统代理端口。能注入的软件开 TCP 端口时，`inject.c` 的 `bind` 把端口挪进这组，挪过的记在 `TMPDIR/.kekkai-ports`，`connect` 连原端口时照着换；同一原端口再开时照实返回“已占用”。不能注入的软件只有沙盒这层，自己开的端口也连不上，要用就打开“本机端口”。
 - 已核实的系统事实：macOS 上 `gethostuuid` 不经沙盒检查（XNU 里 `#if !defined(XNU_TARGET_OS_OSX)`），所以要靠注入改；SBPL 的 `(deny iokit-get-properties (iokit-property ...))` 有效；`network-bind`／`network-outbound` 能按单个端口放行，但端口写不了 0，也写不了范围；只按 `localhost` 限制，连本机局域网地址不算 localhost。
-- **更多设备信息**：`DEVICE_IDS`（磁盘、分区、电池、蓝牙、芯片、触控板、键盘、显示器的序列号和 UUID）能注入时沙盒放行、`inject.c` 的 `morph()` 按种子换成同格式的值（同一原值在一个软件里总换成同一个）；不能注入时沙盒按属性名挡。开机时间、`kern.bootsessionuuid`、磁盘服务、显示器序列号也一样处理（显示器序列号走窗口服务，不能注入时挡不住）。
-- **网络位置**：路由表里带 `RTF_LLINFO` 的条目（ARP、IPv6 邻居）由注入库删掉；`arp`、`ndp`、`netstat`、`ipconfig`、`system_profiler` 在 `NO_EXEC` 里。Wi-Fi 名称和 BSSID 系统本身对没有定位权限的程序打码（实测 `<redacted>`）。不能注入的软件仍能直接用 sysctl 读 ARP 表：`net.route` 同时管着 `getifaddrs`，不能整组挡。
+- **更多设备信息**：`DEVICE_IDS`（磁盘、分区、电池、蓝牙、芯片、触控板、键盘、显示器的序列号和 UUID）能注入时沙盒放行、`inject.c` 的 `morph()` 按种子换成同格式的值（同一原值在一个软件里总换成同一个）；不能注入时沙盒按属性名挡。开机时间、`kern.bootsessionuuid`、磁盘服务、显示器序列号和 UUID（`CGDisplayCreateUUIDFromDisplayID`）也一样处理（显示器的两项走窗口服务，不能注入时挡不住）。
+- **网络位置**：路由表里带 `RTF_LLINFO` 的条目（ARP、IPv6 邻居）由注入库删掉；`arp`、`ndp`、`netstat`、`ipconfig`、`system_profiler` 在 `NO_EXEC` 里。Wi-Fi 名称和 BSSID 系统本身对没有定位权限的程序打码（实测 `<redacted>`）。不能注入的软件由沙盒挡 sysctl 名 `net.routetable.<协议>.<0|30>.<1|2|7>.*`（全部协议和 IPv6 的整表导出）；不能整组挡 `net.route`，网卡列表（操作码 3、6）同时供 `getifaddrs` 用，挡了就断网。IPv4 的 ARP 条目系统本就不给普通程序（实测 `arp -an` 有条目，普通进程用 sysctl 读到 0 条）。
 - **剪贴板三档**：`clipboard_mode()`：off 挡剪贴板服务；paste（能注入时默认）由注入库钩 NSPasteboard 的读内容方法，⌘V 或“粘贴”菜单后 1.5 秒内放行，`types` 照答以免菜单变灰，拖放板不管；on 全放。
 - **进程**：“其他进程信息”关闭时，沙盒另挡 `kern.proc.all` 等 sysctl（只挡 process-info 实测能被它绕过）；能注入的由注入库把别人答成 ESRCH、列表只给自己，不能注入的连 `kern.proc.pid` 也挡。
 - 注入库要先写新文件再替换，原地覆盖已签名的库会让加载它的软件被系统以 `OS_REASON_CODESIGNING` 杀掉。
@@ -67,7 +67,7 @@
 
 - 百度网盘、微信开发者工具、QQ、微信、腾讯会议两个版本的结果见 README 实测表。
 - 端口配额：微信开发者工具在“本机端口”关闭时编译正常，它开的端口全部挪进配额，系统日志没有网络拒绝。
-- 设备信息、邻居条目、剪贴板、进程的注入与沙盒规则用测试程序逐项验证；百度网盘、腾讯会议 VooV、微信、开发者工具带上新规则都能正常运行（这几个这次都以可注入方式运行，“不能注入”那条路只有测试程序验证过）。剪贴板在真实软件里按 ⌘V 的效果未实测。
+- 设备信息、邻居条目、剪贴板、进程的注入与沙盒规则用测试程序逐项验证；百度网盘、腾讯会议 VooV、微信、开发者工具带上新规则都能正常运行（这几个这次都以可注入方式运行，“不能注入”那条路只有测试程序验证过）。剪贴板在真实软件里按 ⌘V 的效果未实测。IPv6 邻居表规则用测试程序（getifaddrs、IPv4/IPv6 联网正常）和 Obsidian（不能注入）验证过。
 - 添加流程：不能运行的软件（如要求 App Store 收据的）会被拒绝并清理，能运行的正常加入。
 - 假用户、假设备在注入后生效；App 能自行安装 support 文件；设置和关于窗口正常。
 - 安装映像里存的布局已读回核对（图标大小、背景、位置、无工具栏和标签栏）。

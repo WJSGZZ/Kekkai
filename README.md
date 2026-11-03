@@ -61,8 +61,8 @@ Apps with the hardened runtime and library validation can't be injected, and rel
 |---|---|---|
 | **Files** | Its own Kekkai folder plus folders you approve. `~/.ssh`, `~/.gnupg` and `~/.aws` are always off-limits, approvals and symlinks included | Same |
 | **User** | `user`, with the Kekkai folder as home, child processes included | User lookups are blocked |
-| **Device identity** | Serial number, hardware UUID, network and Bluetooth addresses, disk and partition UUIDs, battery, chip, trackpad and display serials, boot time: replaced with per-app values in the original format, so apps can't match each other | The same properties are blocked by name |
-| **Network location** | ARP and neighbor entries are stripped from the routing table; `arp`, `netstat`, `ipconfig` and similar tools can't run | Those tools can't run |
+| **Device identity** | Serial number, hardware UUID, network and Bluetooth addresses, disk and partition UUIDs, battery, chip, trackpad and display serials, display UUID, boot time: replaced with per-app values in the original format, so apps can't match each other | The same properties are blocked by name |
+| **Network location** | ARP and neighbor entries are stripped from the routing table; `arp`, `netstat`, `ipconfig` and similar tools can't run | The IPv6 neighbor table can't be dumped (macOS already withholds IPv4 ARP entries from ordinary apps); the same tools can't run |
 | **Local ports** | A private block of 32 ports; the sandbox allows only those. Ports the app opens are moved into the block, so its own parts still connect | Only its own block, which excludes the ports it opens itself; turn on Ports on this Mac when needed |
 | **Clipboard** | Three modes. Default *Write, read on paste*: contents are readable only within 1.5 s of ⌘V or Paste | Off by default, drag and drop included |
 | **Processes** | Every other process is *no such process*; the process table lists only the app | Process info and the process table are blocked |
@@ -129,7 +129,7 @@ Per-app exceptions live in `rules/<bundle id>.json` and are kept to a minimum. T
 ## Limits
 
 - Not stealth: an app can tell it's sandboxed, and the user ID is real.
-- Non-injectable apps can still read the ARP table (it shares an interface with network interface lookups, so blocking it breaks networking) and the display serial. The list of running apps comes from LaunchServices; blocking it stops GUI apps from launching.
+- Non-injectable apps can still read the display serial and UUID; they come from the window server, which the sandbox doesn't govern. The list of running apps comes from LaunchServices; blocking it stops GUI apps from launching.
 - Internet traffic isn't restricted. LAN devices are covered by macOS's Local Network permission; IP-based location needs a proxy.
 - The Block Log sees only denials the system logs, and the log keeps only some repeats.
 - System extensions (such as a cloud drive's sync extension) are out of scope. Gatekeeper and App Store receipt checks are not bypassed.

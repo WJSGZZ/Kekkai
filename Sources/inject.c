@@ -10,6 +10,7 @@
 #include <SystemConfiguration/SystemConfiguration.h>
 #include <DiskArbitration/DiskArbitration.h>
 #include <CoreGraphics/CoreGraphics.h>
+#include <ColorSync/ColorSync.h>
 #include <ifaddrs.h>
 #include <net/if_dl.h>
 #include <sys/sysctl.h>
@@ -603,6 +604,19 @@ static uint32_t my_CGDisplaySerialNumber(CGDirectDisplayID d) {
     return v && seed ? (uint32_t)scramble(seeded(&v, sizeof v)) : v;
 }
 
+// 显示器 UUID 由厂商、型号、序列号算出，同样能认出这块屏
+static CFUUIDRef my_CGDisplayCreateUUIDFromDisplayID(uint32_t d) {
+    CFUUIDRef u = CGDisplayCreateUUIDFromDisplayID(d);
+    if (!u || !seed) return u;
+    CFStringRef s = CFUUIDCreateString(NULL, u);
+    CFStringRef m = morph(s);
+    CFRelease(u);
+    CFRelease(s);
+    u = m ? CFUUIDCreateFromString(NULL, m) : NULL;
+    if (m) CFRelease(m);
+    return u;
+}
+
 // 开机时间往前挪 0～6 小时、本次开机编号换掉：每次开机都变，各软件挪的量不同，对不上
 static void fake_boottime(struct timeval *tv) {
     time_t real = tv->tv_sec;
@@ -728,6 +742,7 @@ INTERPOSE(my_IORegistryEntryCreateCFProperties, IORegistryEntryCreateCFPropertie
 INTERPOSE(my_IORegistryEntryGetProperty, IORegistryEntryGetProperty)
 INTERPOSE(my_DADiskCopyDescription, DADiskCopyDescription)
 INTERPOSE(my_CGDisplaySerialNumber, CGDisplaySerialNumber)
+INTERPOSE(my_CGDisplayCreateUUIDFromDisplayID, CGDisplayCreateUUIDFromDisplayID)
 INTERPOSE(my_gethostuuid, gethostuuid)
 INTERPOSE(my_getifaddrs, getifaddrs)
 INTERPOSE(my_gethostname, gethostname)

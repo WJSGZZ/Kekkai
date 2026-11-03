@@ -4,9 +4,11 @@
 // 软件开新进程时常把环境变量整个换掉，这里把注入和这些设置补回去，子进程也拿到同样的答案。
 // 端口：它开的 TCP 端口挪进结界分给它的那组，沙盒只许它连这组，所以连得上自己的、连不上别人的。
 // 剪贴板：可以写；读内容只在你按 ⌘V 或点“粘贴”后的一会儿放行。
+// 拖放与粘贴：从结界外拖进来、粘贴进来的文件由结界外的中转程序复制一份（粘贴要你在系统提示里确认），软件读到的路径换成副本，碰不到原文件，也看不到原路径。
 // 进程：别的程序一律“没有这个进程”，列表里只有它自己，像一台什么都没开的 Mac。
 // 局域网：连不上局域网里的设备，也搜不到 Bonjour 服务；DNS 和系统代理照常。
 // 语言：首选语言和地区换成常见的组合（如简体中文、中国），不留第二语言。
+// 程序坞：图标右下角叠上结界图标，看得出这个是结界中运行的。
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 #include <SystemConfiguration/SystemConfiguration.h>
@@ -35,6 +37,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <sys/un.h>
+#include <os/lock.h>
 #include <dns_sd.h>
 #include <Network/Network.h>
 
@@ -45,7 +49,7 @@
 static const char *carry[] = {"HOME", "DYLD_INSERT_LIBRARIES", "KEKKAI_HOME", "KEKKAI_LAT", "KEKKAI_LON",
                               "KEKKAI_SERIAL", "KEKKAI_UUID", "KEKKAI_NAME", "KEKKAI_SEED",
                               "KEKKAI_PORTS", "KEKKAI_PORTMAP", "KEKKAI_PASTE", "KEKKAI_PROCS",
-                              "KEKKAI_NOLAN", "KEKKAI_LANG", "KEKKAI_LOCALE", NULL};
+                              "KEKKAI_NOLAN", "KEKKAI_LANG", "KEKKAI_LOCALE", "KEKKAI_RELAY", "KEKKAI_BADGE", NULL};
 static char *saved[sizeof carry / sizeof *carry];  // 启动时记下的 "名字=值"
 static char *home, *serial, *uuid, *name, *seed, *portmap;
 static int pstart, pcount;  // 分给它的端口：pstart 起 pcount 个
@@ -55,7 +59,12 @@ static struct passwd fake;
 // ---- 剪贴板 ----
 
 static double paste_until;  // 这个时刻之前读剪贴板放行
-static CFStringRef general;  // 通用剪贴板的名字；拖放用的是另一块，不管
+static int paste_gate;  // 通用剪贴板只在粘贴时可读
+static CFStringRef general, dragboard;  // 通用剪贴板和拖放板的名字
+static char *relay_sock;  // 结界外的中转程序
+static long relayed = -1, relayed_paste = -1;  // 已经问过中转程序的拖放板、剪贴板序号
+static CFMutableArrayRef relay_from, relay_to;  // 原文件的各种写法 → 副本的写法，一直累积，再次读到同一文件也换
+static os_unfair_lock relay_lock = OS_UNFAIR_LOCK_INIT;
 
 static double now_s(void) {
     struct timespec t;
@@ -63,9 +72,140 @@ static double now_s(void) {
     return t.tv_sec + t.tv_nsec / 1e9;
 }
 
+// 拖进来的文件在结界外，软件读不到。读拖放板时请结界外的中转程序复制一份进传输文件夹；
+// 那边自己核对拖动是从结界外开始、指针在这个软件的窗口上，不信这里说的任何内容，答回每个文件“原写法<TAB>副本写法”
+// 粘贴时同样请它处理剪贴板上的文件，那边弹出系统提示由用户确认（kind 为 'P'，拖放为 'D'）
+static void relay_ask(id pb, char kind, long *done) {
+    long c = ((long (*)(id, SEL))objc_msgSend)(pb, sel_registerName("changeCount"));
+    if (c == *done) return;
+    *done = c;
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un a = {.sun_family = AF_UNIX};
+    strlcpy(a.sun_path, relay_sock, sizeof a.sun_path);
+    if (fd < 0 || connect(fd, (struct sockaddr *)&a, sizeof a) || write(fd, &kind, 1) != 1) { if (fd >= 0) close(fd); return; }
+    size_t cap = 65536, n = 0;
+    char *buf = malloc(cap);
+    ssize_t r;
+    while (buf && (r = read(fd, buf + n, cap - 1 - n)) > 0)
+        if ((n += r) == cap - 1) buf = realloc(buf, cap *= 2);
+    close(fd);
+    if (!buf) return;
+    buf[n] = 0;
+    char *save = NULL;
+    os_unfair_lock_lock(&relay_lock);
+    for (char *line = strtok_r(buf, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        char *tab = strchr(line, '\t');
+        if (!tab) continue;
+        *tab = 0;
+        CFStringRef from = CFStringCreateWithCString(NULL, line, kCFStringEncodingUTF8), to = CFStringCreateWithCString(NULL, tab + 1, kCFStringEncodingUTF8);
+        if (from && to) { CFArrayAppendValue(relay_from, from); CFArrayAppendValue(relay_to, to); }
+        if (from) CFRelease(from);
+        if (to) CFRelease(to);
+    }
+    os_unfair_lock_unlock(&relay_lock);
+    free(buf);
+}
+
+// 文字里出现原文件的写法就换成副本的；没变返回 NULL
+static CFStringRef relay_text(CFStringRef s) {
+    CFMutableStringRef m = NULL;
+    os_unfair_lock_lock(&relay_lock);
+    for (CFIndex i = 0, k = CFArrayGetCount(relay_from); i < k; i++) {
+        CFStringRef from = CFArrayGetValueAtIndex(relay_from, i);
+        if (CFStringFind(m ? m : s, from, 0).location == kCFNotFound) continue;
+        if (!m) m = CFStringCreateMutableCopy(NULL, 0, s);
+        CFStringFindAndReplace(m, from, CFArrayGetValueAtIndex(relay_to, i), CFRangeMake(0, CFStringGetLength(m)), 0);
+    }
+    os_unfair_lock_unlock(&relay_lock);
+    return m;
+}
+
+// 拖进来的内容里的路径和网址换成副本；读不成文字的数据（如访达的文件节点）可能带着原路径，不给
+static id relay_value(id v) {
+    if (!v) return v;
+    CFTypeID t = CFGetTypeID(v);
+    if (t == CFStringGetTypeID()) {
+        CFStringRef r = relay_text((CFStringRef)v);
+        return r ? (id)CFAutorelease(r) : v;
+    }
+    if (t == CFURLGetTypeID()) {
+        CFURLRef abs = CFURLCopyAbsoluteURL((CFURLRef)v);
+        CFStringRef r = abs ? relay_text(CFURLGetString(abs)) : NULL;
+        if (abs) CFRelease(abs);
+        if (!r) return v;
+        CFURLRef u = CFURLCreateWithString(NULL, r, NULL);
+        CFRelease(r);
+        return u ? (id)CFAutorelease(u) : nil;
+    }
+    if (t == CFDataGetTypeID()) {
+        const UInt8 *bytes = CFDataGetBytePtr((CFDataRef)v);
+        CFIndex len = CFDataGetLength((CFDataRef)v);
+        if (len >= 6 && !memcmp(bytes, "bplist", 6)) {  // 二进制属性列表：解开换完再按原格式写回
+            CFPropertyListFormat fmt;
+            CFPropertyListRef pl = CFPropertyListCreateWithData(NULL, (CFDataRef)v, 0, &fmt, NULL);
+            if (!pl) return nil;
+            id e = relay_value((id)pl);
+            CFDataRef d = e ? CFPropertyListCreateData(NULL, (CFPropertyListRef)e, fmt, 0, NULL) : NULL;
+            CFRelease(pl);
+            return d ? (id)CFAutorelease(d) : nil;
+        }
+        CFStringRef str = memchr(bytes, 0, len) ? NULL : CFStringCreateFromExternalRepresentation(NULL, (CFDataRef)v, kCFStringEncodingUTF8);
+        if (!str) return nil;
+        CFStringRef r = relay_text(str);
+        CFRelease(str);
+        if (!r) return v;
+        CFDataRef d = CFStringCreateExternalRepresentation(NULL, r, kCFStringEncodingUTF8, 0);
+        CFRelease(r);
+        return d ? (id)CFAutorelease(d) : nil;
+    }
+    if (t == CFArrayGetTypeID()) {
+        CFIndex k = CFArrayGetCount((CFArrayRef)v);
+        CFMutableArrayRef out = CFArrayCreateMutable(NULL, k, &kCFTypeArrayCallBacks);
+        for (CFIndex i = 0; i < k; i++) {
+            id e = relay_value((id)CFArrayGetValueAtIndex((CFArrayRef)v, i));
+            if (e) CFArrayAppendValue(out, e);
+        }
+        return (id)CFAutorelease(out);
+    }
+    if (t == CFDictionaryGetTypeID()) {
+        CFIndex k = CFDictionaryGetCount((CFDictionaryRef)v);
+        const void **keys = malloc(sizeof(void *) * (k + 1)), **vals = malloc(sizeof(void *) * (k + 1));
+        CFDictionaryGetKeysAndValues((CFDictionaryRef)v, keys, vals);
+        CFMutableDictionaryRef out = CFDictionaryCreateMutable(NULL, k, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        for (CFIndex i = 0; i < k; i++) {
+            id e = relay_value((id)vals[i]);
+            if (e) CFDictionarySetValue(out, keys[i], e);
+        }
+        free(keys);
+        free(vals);
+        return (id)CFAutorelease(out);
+    }
+    return v;
+}
+
+// 这块剪贴板（或其中一项）的文件是中转过的：用原来的读法取文件网址，看是不是记下的原写法
+static int relayed_source(id obj, IMP read_string) {
+    static __thread int inside;  // stringForType: 内部又调 dataForType:，不再往下查，否则无限递归（实测栈溢出）
+    if (!relay_from || !read_string || inside) return 0;
+    inside = 1;
+    id u = ((id (*)(id, SEL, id))read_string)(obj, sel_registerName("stringForType:"), (id)CFSTR("public.file-url"));
+    inside = 0;
+    if (!u) return 0;
+    os_unfair_lock_lock(&relay_lock);
+    int hit = CFArrayContainsValue(relay_from, CFRangeMake(0, CFArrayGetCount(relay_from)), u);
+    os_unfair_lock_unlock(&relay_lock);
+    return hit;
+}
+
 static int may_read(id pb) {
-    if (now_s() < paste_until || !general) return 1;
     CFTypeRef n = ((id (*)(id, SEL))objc_msgSend)(pb, sel_registerName("name"));
+    if (relay_sock && n && dragboard && CFEqual(n, dragboard)) relay_ask(pb, 'D', &relayed);
+    int pasting = now_s() < paste_until;
+    if (relay_sock && pasting && n && general && CFEqual(n, general)) {
+        relay_ask(pb, 'P', &relayed_paste);
+        if (paste_until < now_s() + 1.5) paste_until = now_s() + 1.5;  // 用户确认花的时间不算进粘贴后的读取窗口
+    }
+    if (!paste_gate || pasting || !general) return 1;
     return !n || !CFEqual(n, general);
 }
 
@@ -80,13 +220,20 @@ static int text_has(id s, const char *part) {
 }
 
 static IMP orig_data, orig_string, orig_plist, orig_objects, orig_items, orig_file, orig_wrapper, orig_event, orig_action;
+static IMP orig_idata, orig_istring, orig_iplist;  // NSPasteboardItem 的读法
 
-static id g_data(id self, SEL s, id type) { return may_read(self) ? ((id (*)(id, SEL, id))orig_data)(self, s, type) : nil; }
-static id g_string(id self, SEL s, id type) { return may_read(self) ? ((id (*)(id, SEL, id))orig_string)(self, s, type) : nil; }
-static id g_plist(id self, SEL s, id type) { return may_read(self) ? ((id (*)(id, SEL, id))orig_plist)(self, s, type) : nil; }
+#define READ(orig, obj, s, type) ((id (*)(id, SEL, id))orig)(obj, s, type)
+#define RELAY(obj, istr, v) (relayed_source(obj, istr) ? relay_value(v) : (v))
+static id g_data(id self, SEL s, id type) { return may_read(self) ? RELAY(self, orig_string, READ(orig_data, self, s, type)) : nil; }
+static id g_string(id self, SEL s, id type) { return may_read(self) ? RELAY(self, orig_string, READ(orig_string, self, s, type)) : nil; }
+static id g_plist(id self, SEL s, id type) { return may_read(self) ? RELAY(self, orig_string, READ(orig_plist, self, s, type)) : nil; }
 static id g_objects(id self, SEL s, id cls, id opt) {
-    return may_read(self) ? ((id (*)(id, SEL, id, id))orig_objects)(self, s, cls, opt) : nil;
+    return may_read(self) ? RELAY(self, orig_string, ((id (*)(id, SEL, id, id))orig_objects)(self, s, cls, opt)) : nil;
 }
+// 拖放板的各项：软件常先取 pasteboardItems 再逐项读
+static id gi_data(id self, SEL s, id type) { return RELAY(self, orig_istring, READ(orig_idata, self, s, type)); }
+static id gi_string(id self, SEL s, id type) { return RELAY(self, orig_istring, READ(orig_istring, self, s, type)); }
+static id gi_plist(id self, SEL s, id type) { return RELAY(self, orig_istring, READ(orig_iplist, self, s, type)); }
 static id g_items(id self, SEL s) { return may_read(self) ? ((id (*)(id, SEL))orig_items)(self, s) : nil; }
 static id g_file(id self, SEL s, id type, id path) {
     return may_read(self) ? ((id (*)(id, SEL, id, id))orig_file)(self, s, type, path) : nil;
@@ -127,13 +274,19 @@ static void hook(const char *cls, const char *sel, IMP mine, IMP *orig) {
 
 static void guard_clipboard(void) {
     if (!objc_getClass("NSPasteboard") || !objc_getClass("NSApplication")) return;  // 没有界面的进程碰不到剪贴板
-    id *g = dlsym(RTLD_DEFAULT, "NSPasteboardNameGeneral");
+    id *g = dlsym(RTLD_DEFAULT, "NSPasteboardNameGeneral"), *d = dlsym(RTLD_DEFAULT, "NSPasteboardNameDrag");
     general = g && *g ? CFRetain((CFTypeRef)*g) : NULL;
+    dragboard = d && *d ? CFRetain((CFTypeRef)*d) : NULL;
     hook("NSPasteboard", "dataForType:", (IMP)g_data, &orig_data);
     hook("NSPasteboard", "stringForType:", (IMP)g_string, &orig_string);
     hook("NSPasteboard", "propertyListForType:", (IMP)g_plist, &orig_plist);
     hook("NSPasteboard", "readObjectsForClasses:options:", (IMP)g_objects, &orig_objects);
     hook("NSPasteboard", "pasteboardItems", (IMP)g_items, &orig_items);
+    if (relay_sock) {
+        hook("NSPasteboardItem", "dataForType:", (IMP)gi_data, &orig_idata);
+        hook("NSPasteboardItem", "stringForType:", (IMP)gi_string, &orig_istring);
+        hook("NSPasteboardItem", "propertyListForType:", (IMP)gi_plist, &orig_iplist);
+    }
     hook("NSPasteboard", "readFileContentsType:toFile:", (IMP)g_file, &orig_file);
     hook("NSPasteboard", "readFileWrapper", (IMP)g_wrapper, &orig_wrapper);
     hook("NSApplication", "sendEvent:", (IMP)g_event, &orig_event);
@@ -141,6 +294,37 @@ static void guard_clipboard(void) {
 }
 
 static void hide_apps(void);
+
+// 程序坞图标：启动完成后把它的图标换成右下角叠了结界图标的一份，和入口 App 的图标一致（入口那份见 Kekkai.swift 的 launcherIcon）。
+// 只改显示在程序坞里的进程；两张图都按系统图标网格留了约 9.8% 的边，角标对齐原图标右下角并略微探出
+static char *badge_path;
+static id msg(id o, const char *s) { return ((id (*)(id, SEL))objc_msgSend)(o, sel_registerName(s)); }
+static void badge_dock(void) {
+    Class A = objc_getClass("NSApplication"), I = objc_getClass("NSImage");
+    if (!A || !I) return;
+    id app = msg((id)A, "sharedApplication");
+    if (((long (*)(id, SEL))objc_msgSend)(app, sel_registerName("activationPolicy")) != 0) return;  // 0：普通 App
+    id base = msg(app, "applicationIconImage");
+    CFStringRef p = CFStringCreateWithCString(NULL, badge_path, kCFStringEncodingUTF8);
+    id badge = ((id (*)(id, SEL, id))objc_msgSend)(msg((id)I, "alloc"), sel_registerName("initWithContentsOfFile:"), (id)p);
+    CFRelease(p);
+    if (!base || !badge) return;
+    id img = ((id (*)(id, SEL, CGSize))objc_msgSend)(msg((id)I, "alloc"), sel_registerName("initWithSize:"), CGSizeMake(1024, 1024));
+    SEL draw = sel_registerName("drawInRect:");
+    double s = 470, margin = s * 0.098, out = 24;
+    msg(img, "lockFocus");
+    ((void (*)(id, SEL, CGRect))objc_msgSend)(base, draw, CGRectMake(0, 0, 1024, 1024));
+    ((void (*)(id, SEL, CGRect))objc_msgSend)(badge, draw, CGRectMake(1024 - 100 + out + margin - s, 100 - out - margin, s, s));
+    msg(img, "unlockFocus");
+    ((void (*)(id, SEL, id))objc_msgSend)(app, sel_registerName("setApplicationIconImage:"), img);
+    msg(img, "release");
+    msg(badge, "release");
+}
+static IMP orig_finish;
+static void g_finish(id self, SEL sel) {
+    ((void (*)(id, SEL))orig_finish)(self, sel);
+    badge_dock();
+}
 
 static void find_proxies(void);
 static void set_language(const char *lang, const char *locale);
@@ -160,11 +344,21 @@ __attribute__((constructor)) static void setup(void) {
     if ((v = getenv("KEKKAI_SEED"))) seed = strdup(v);
     if ((v = getenv("KEKKAI_PORTS")) && sscanf(v, "%d:%d", &pstart, &pcount) != 2) pcount = 0;
     if ((v = getenv("KEKKAI_PORTMAP"))) portmap = strdup(v);
-    if (getenv("KEKKAI_PASTE")) guard_clipboard();
+    paste_gate = getenv("KEKKAI_PASTE") != NULL;
+    if ((v = getenv("KEKKAI_RELAY"))) {
+        relay_sock = strdup(v);
+        relay_from = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+        relay_to = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+    }
+    if (paste_gate || relay_sock) guard_clipboard();
     hide_procs = getenv("KEKKAI_PROCS") != NULL;
     if (hide_procs) hide_apps();
     if ((no_lan = getenv("KEKKAI_NOLAN") != NULL)) find_proxies();
     if (getenv("KEKKAI_LANG") && getenv("KEKKAI_LOCALE")) set_language(getenv("KEKKAI_LANG"), getenv("KEKKAI_LOCALE"));
+    if ((v = getenv("KEKKAI_BADGE"))) {
+        badge_path = strdup(v);
+        hook("NSApplication", "finishLaunching", (IMP)g_finish, &orig_finish);
+    }
     const char *h = getenv("KEKKAI_HOME");
     if (!h) return;
     home = strdup(h);

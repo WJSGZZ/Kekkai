@@ -9,7 +9,9 @@ built="$("$src/scripts/build.sh" | tail -1)"
 # 管理员能直接写系统的“应用程序”；不能写才放个人的 ~/Applications
 if [ -w /Applications ]; then app="/Applications/Kekkai.app"; rm -rf "$HOME/Applications/Kekkai.app"; else app="$HOME/Applications/Kekkai.app"; fi
 rm -rf "$app"; ditto "$built" "$app"
+# 构建目录里的那份也会被聚焦收录，搜“结界”出现两个；装好就删掉，打安装映像时会重新构建
+rm -rf "$built"
 dst="$HOME/Library/Application Support/Kekkai/bin"; mkdir -p "$dst"
-rm -rf "$dst/rules"; ditto "$app/Contents/Resources/support" "$dst"; rm -f "$dst/libkekkaiuser.dylib"
+rm -rf "${dst:?}"/*; ditto "$app/Contents/Resources/support" "$dst"  # 先清空，不留旧版的文件
 # 聚焦在文件还没放齐时就收录了，记成英文名，中文搜“结界”搜不到；装完让它重新收录
 mdimport "$app" || echo "聚焦收录失败，可稍后自行搜索"; echo "Installed / 已安装：$app"

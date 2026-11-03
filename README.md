@@ -4,7 +4,7 @@
 
 # Kekkai
 
-**Run Mac apps in isolation: each one sees only its own data and a device identity made just for it.**
+**Let every app mind its own business.**
 
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-151515?logo=apple&logoColor=white)
 ![Apple silicon and Intel](https://img.shields.io/badge/Apple%20silicon%20%2B%20Intel-universal-151515)

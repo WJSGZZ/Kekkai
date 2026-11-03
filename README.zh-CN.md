@@ -4,7 +4,7 @@
 
 # 结界 Kekkai
 
-**让 Mac 上的每个软件只看得到自己的数据，和一套只属于它的设备信息。**
+**让每个软件，只做分内的事。**
 
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-151515?logo=apple&logoColor=white)
 ![Apple silicon and Intel](https://img.shields.io/badge/Apple%20silicon%20%2B%20Intel-universal-151515)

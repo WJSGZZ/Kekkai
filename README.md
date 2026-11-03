@@ -18,7 +18,7 @@ English · [简体中文](README.zh-CN.md)
 
 <img src="Assets/screenshot-en.png" width="860" alt="Kekkai main window with QQ's Block Log in the inspector">
 
-<sub>One QQ session in Kekkai: 699 looks at other running programs, 40 local port probes, 16 scans for installed apps. All blocked.</sub>
+<sub>About a day of QQ in Kekkai: it tried to read 699 other processes (some 39,000 attempts in the system log), connect to 40 local ports and look in 16 installed-app locations. All denied.</sub>
 
 </div>
 
@@ -111,7 +111,7 @@ Tested on macOS 27.2.
 | Tencent Meeting (direct download) | In place | Remembers its data folder with a bookmark that breaks if moved, so its rule keeps it in place. Stays signed in |
 | VooV Meeting (App Store) | Clone | Reaches sign-in with no errors; injection active |
 | WeChat DevTools | Kekkai folder | Builds with *Ports on this Mac* off; all 6 ports it opens land in its block, no network denials logged |
-| QQ, WeChat | Clone | Reach the QR sign-in screen. One QQ session: 699 process lookups, 40 port probes, 16 installed-app scans |
+| QQ, WeChat | Clone | Reach the QR sign-in screen. Over about a day, QQ tried to read 699 other processes, 40 local ports and 16 installed-app locations |
 | Bandizip (paid, App Store) | — | Checks its purchase receipt (exit code 173), which a clone can't pass; refused at add time with the reason |
 
 ## Limits

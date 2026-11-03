@@ -446,6 +446,9 @@ def build_profile(app, bundle_id, rule, conf, mode, groups=()):
               "(allow file-read* file-write*", f"  (subpath {q(space)})", *[f"  (subpath {q(p)})" for p in approved], *["  " + s for s in system], ")"]
         # 打开项目时常先列出上一级找它（实测微信开发者工具），只给看名字，不给读内容
         L += [f"(allow file-read-data (literal {q(str(Path(p).parent))}))" for p in approved]
+        # 软件存下的旧绝对路径要经过旧位置的链接（实测 QQ 的储存路径），只放行链接本身，指向的地方照常按上面判断
+        if OLD_SPACES.is_symlink():
+            L.append(f"(allow file-read-metadata (literal {q(str(OLD_SPACES))}))")
     else:
         names = own_names(bundle_id, rule)
         # 按 ID 放行 com.tencent.qq 和 com.tencent.qq.share 这类，不放行 com.tencent.qqmusic

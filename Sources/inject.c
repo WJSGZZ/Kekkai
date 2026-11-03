@@ -865,9 +865,12 @@ static int is(CFStringRef key, const char *s) {
 // 其余能认出这台 Mac 的值（磁盘、电池、蓝牙、芯片、触控板等的序列号和 UUID）：按种子和原值换一个同样格式的，
 // 同一个原值在这个软件里永远换成同一个，各软件之间不同
 static const char *morphed[] = {"UUID", "VolGroupUUID", "SerialNumber", "Serial", "ECID", "ecid", "unique-chip-id",
-                                "BD_ADDR", "local-mac-address", "mac-address", "USB Serial Number", "kUSBSerialNumberString", NULL};
+                                "BD_ADDR", "local-mac-address", "mac-address", "USB Serial Number", "kUSBSerialNumberString",
+                                "Serial Number", "NamespaceUUID", "Domain UUID", "BootSessionUUID", "FrontCameraModuleSerialNumString",
+                                "FrontIRStructuredLightProjectorSerialNumString", "AccessoryCertificateSerialNumber", NULL};
 // 里面夹着序列号的整块数据，直接当没有
-static const char *dropped[] = {"BatteryData", "EDID", "IODisplayEDID", "IODisplayEDIDOriginal", "DisplayAttributes", NULL};
+static const char *dropped[] = {"BatteryData", "Device Characteristics", "Controller Characteristics", "AdapterDetails",
+                                "AppleRawAdapterDetails", "EDID", "IODisplayEDID", "IODisplayEDIDOriginal", "DisplayAttributes", NULL};
 
 static int listed(CFStringRef key, const char **list) {
     for (int i = 0; list[i]; i++) if (is(key, list[i])) return 1;

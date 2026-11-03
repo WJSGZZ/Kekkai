@@ -301,11 +301,14 @@ func injectable(_ app: String) -> Bool {
 
 // 会认出这台 Mac 的硬件属性；能注入的软件拿到假值，不能注入的直接拿不到
 let HARDWARE_IDS = ["IOPlatformSerialNumber", "IOPlatformUUID", "serial-number", "mlb-serial-number", "IOMACAddress"]
-// 磁盘、电池、蓝牙、芯片、触控板、键盘、显示器的序列号和 UUID（实测结界里原本都读得到，且各软件读到的一样）。
-// 能注入的软件放行，由注入库按它的种子换成另一套（要照着原值的格式换）；不能注入的直接挡
+// 磁盘、电池、蓝牙、芯片、触控板、键盘、显示器、摄像头的序列号和 UUID（实测结界里原本都读得到，且各软件读到的一样）。
+// 能注入的软件放行，由注入库按它的种子换成另一套（要照着原值的格式换）；不能注入的直接挡。
+// 与 inject.c 的 morphed、dropped 两表一致
 let DEVICE_IDS = ["UUID", "VolGroupUUID", "SerialNumber", "Serial", "ECID", "ecid", "unique-chip-id", "BD_ADDR", "local-mac-address",
-                  "mac-address", "USB Serial Number", "kUSBSerialNumberString", "BatteryData", "EDID", "IODisplayEDID",
-                  "IODisplayEDIDOriginal", "DisplayAttributes"]
+                  "mac-address", "USB Serial Number", "kUSBSerialNumberString", "Serial Number", "NamespaceUUID", "Domain UUID",
+                  "BootSessionUUID", "FrontCameraModuleSerialNumString", "FrontIRStructuredLightProjectorSerialNumString",
+                  "AccessoryCertificateSerialNumber", "BatteryData", "Device Characteristics", "Controller Characteristics",
+                  "AdapterDetails", "AppleRawAdapterDetails", "EDID", "IODisplayEDID", "IODisplayEDIDOriginal", "DisplayAttributes"]
 
 func modelName() -> String {
     let out = sh(["/usr/sbin/system_profiler", "SPHardwareDataType"]).out
@@ -680,6 +683,16 @@ func commonRules(_ rule: Dict, _ conf: Dict, _ mode: String = "space") -> [Strin
             // 开机时间、本次开机编号、磁盘服务给的分区 UUID 也能对上号；能注入的换成假的，不能注入的挡掉
             L += ["(deny sysctl-read (sysctl-name \"kern.bootsessionuuid\") (sysctl-name \"kern.boottime\"))",
                   "(deny mach-lookup (global-name \"com.apple.DiskArbitration.diskarbitrationd\"))"]
+        } else {
+            // 注入库只进得了软件自己的程序；它调起的系统程序（ioreg、diskutil、ifconfig、scutil、hostname）不能注入，
+            // 实测会读出真实的序列号、分区 UUID、网卡地址、电脑名和主机名。这些只对系统程序挡掉
+            let sys = "(process-attribute is-platform-binary)"
+            L += [";; 软件调起的系统程序读不到真实的设备信息",
+                  "(deny iokit-get-properties (with errno 2) (require-all \(sys) (iokit-property " + DEVICE_IDS.map(q).joined(separator: " ") + ")))",
+                  "(deny sysctl-read (require-all \(sys) (sysctl-name \"kern.bootsessionuuid\" \"kern.boottime\" \"kern.hostname\")))",
+                  "(deny sysctl-read (require-all \(sys) (sysctl-name-regex #\"^net\\.routetable\\.0\\.[0-9]+\\.(3|6)\\.\")))",
+                  "(deny mach-lookup (require-all \(sys) (global-name \"com.apple.DiskArbitration.diskarbitrationd\" \"com.apple.SystemConfiguration.configd\")))",
+                  "(deny file-read* (require-all \(sys) (literal \"/Library/Preferences/SystemConfiguration/preferences.plist\")))"]
         }
     }
     if !inject {

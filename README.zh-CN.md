@@ -28,7 +28,7 @@
 
 支持 macOS 14 及以上，Apple 芯片和 Intel 通用。
 
-从[最新发布](https://github.com/WJSGZZ/Kekkai/releases/latest)下载 `Kekkai-0.1.dmg`，打开后把“结界”拖到“应用程序”。安装包为临时签名、未经 Apple 公证，首次打开会被 macOS 拦下，请在“系统设置 › 隐私与安全性”中点“仍要打开”。
+从[最新发布](https://github.com/WJSGZZ/Kekkai/releases/latest)下载 `Kekkai-0.1.1.dmg`，打开后把“结界”拖到“应用程序”。安装包为临时签名、未经 Apple 公证，首次打开会被 macOS 拦下，请在“系统设置 › 隐私与安全性”中点“仍要打开”。
 
 也可以从源码构建（需要 Xcode 命令行工具，`xcode-select --install`）：
 

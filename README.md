@@ -28,7 +28,7 @@ Kekkai (結界, "barrier") wraps unmodified apps in macOS's kernel sandbox and, 
 
 Kekkai needs macOS 14 or later and is a universal app for Apple silicon and Intel.
 
-Download `Kekkai-0.1.dmg` from [the latest release](https://github.com/WJSGZZ/Kekkai/releases/latest), open it and drag Kekkai to Applications. The build is ad-hoc signed and not notarized, so macOS blocks the first launch; choose *Open Anyway* in System Settings › Privacy & Security.
+Download `Kekkai-0.1.1.dmg` from [the latest release](https://github.com/WJSGZZ/Kekkai/releases/latest), open it and drag Kekkai to Applications. The build is ad-hoc signed and not notarized, so macOS blocks the first launch; choose *Open Anyway* in System Settings › Privacy & Security.
 
 To build from source instead (needs the Xcode Command Line Tools, `xcode-select --install`):
 

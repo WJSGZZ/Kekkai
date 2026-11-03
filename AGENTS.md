@@ -35,6 +35,14 @@
 - **更多设备信息**：`DEVICE_IDS`（磁盘、分区、电池、蓝牙、芯片、触控板、键盘、显示器的序列号和 UUID）能注入时沙盒放行、`inject.c` 的 `morph()` 按种子换成同格式的值（同一原值在一个软件里总换成同一个）；不能注入时沙盒按属性名挡。开机时间、`kern.bootsessionuuid`、磁盘服务、显示器序列号和 UUID（`CGDisplayCreateUUIDFromDisplayID`）也一样处理（显示器的两项走窗口服务，不能注入时挡不住）。
 - **网络位置**：路由表里带 `RTF_LLINFO` 的条目（ARP、IPv6 邻居）由注入库删掉；`arp`、`ndp`、`netstat`、`ipconfig`、`system_profiler` 在 `NO_EXEC` 里。Wi-Fi 名称和 BSSID 系统本身对没有定位权限的程序打码（实测 `<redacted>`）。不能注入的软件由沙盒挡 sysctl 名 `net.routetable.<协议>.<0|30>.<1|2|7>.*`（全部协议和 IPv6 的整表导出）；不能整组挡 `net.route`，网卡列表（操作码 3、6）同时供 `getifaddrs` 用，挡了就断网。IPv4 的 ARP 条目系统本就不给普通程序（实测 `arp -an` 有条目，普通进程用 sysctl 读到 0 条）。
 - **钥匙串**：始终用结界文件夹里的独立钥匙串（`private_keychain()`），不提供改用用户钥匙串的选项，用户钥匙串在结界文件夹之外；原地运行的软件整个挡住钥匙串服务。实测沙盒内对 `login.keychain-db` 列证书得 0 条（沙盒外 5 条）。
+- **运行中的软件与窗口**：“其他进程信息”关闭且能注入时，`hide_apps()` 钩 `NSWorkspace runningApplications`／`frontmostApplication`／`menuBarOwningApplication` 和 `NSRunningApplication` 的两个类方法，`CGWindowListCopyWindowInfo` 等三个窗口列表函数按所属进程过滤，只留它自己、子进程和同一软件 ID。实测由 114 个软件、125 个窗口降到 1 个和 0 个。不能注入时沙盒挡不了（LaunchServices、窗口服务器是图形软件必需的）。
+- **聚焦搜索**：沙盒挡 `com.apple.metadata.mds`；不挡时，禁止读 `/Applications` 也能搜出全部软件（实测 322 个）。规则可写 `allow_spotlight` 放开。
+- **添加时先试副本**：不能注入、没有苹果沙盒、设置里没选过 `clone` 的软件，`add()` 先设 `clone` 试运行，起不来就删掉副本、改回原版再试。实测 Obsidian 以副本加入。
+- **登录项与特权助手**：沙盒挡 `com.apple.xpc.smd`、`com.apple.backgroundtaskmanagement*`、`com.apple.authd`、`com.apple.security.authtrampoline`。不挡时沙盒内 `SMAppService` 注册登录项成功（实测），下次登录就在结界外运行；`SMJobSubmit` 本来就被 launchd 拒绝（实测错误码 4）。
+- **结界外的组件**：`outside_parts()` 列出不是结界任务后代的同一软件进程（扩展、用副本时原版的进程、不在沙盒里的进程），以及 LaunchAgents／LaunchDaemons／PrivilegedHelperTools 里同厂商前缀的项目；界面在设置顶部提示。实测列出百度网盘的 `baiduNetdiskSync`。
+- **原地运行的缺口**：`real` 模式家目录是真的，不设 `KEKKAI_HOME`，路径里的账户名可见。
+- **带隔离标记的软件不用副本**：`quarantined()`；临时签名副本被门禁拒绝（实测 `ASP: Security policy would not allow process`，退出原因 OS_REASON_EXEC），不绕过门禁，所以 `add()` 不先试副本、`run()` 忽略 `clone`、界面不显示副本开关。
+- **腾讯会议官网版实测（2026-11-03，3.47.2）**：清空旧数据后以结界文件夹模式能启动，不写真实资料库；但它通过 LaunchServices 查到 App Store 版（沙盒内查询软件 ID 能得到 VooV，未读其文件），每次启动都要求授权读取 App Store 版数据。不能注入、带隔离标记，结界无法隐藏这次查询。用户选择只留 App Store 版，官网版已移除；是否保持登录未测，规则仍为 `real`。系统的打开面板会把 `NSOSPLastRootDirectory` 写进真实的偏好设置。
 - **剪贴板三档**：`clipboard_mode()`：off 挡剪贴板服务；paste（能注入时默认）由注入库钩 NSPasteboard 的读内容方法，⌘V 或“粘贴”菜单后 1.5 秒内放行，`types` 照答以免菜单变灰，拖放板不管；on 全放。
 - **进程**：“其他进程信息”关闭时，沙盒另挡 `kern.proc.all` 等 sysctl（只挡 process-info 实测能被它绕过）；能注入的由注入库把别人答成 ESRCH、列表只给自己，不能注入的连 `kern.proc.pid` 也挡。
 - 注入库要先写新文件再替换，原地覆盖已签名的库会让加载它的软件被系统以 `OS_REASON_CODESIGNING` 杀掉。

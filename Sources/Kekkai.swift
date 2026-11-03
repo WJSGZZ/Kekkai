@@ -72,6 +72,7 @@ struct AppEntry: Codable, Identifiable, Equatable {
     var clipboard: String? = nil
     var injectable: Bool? = nil
     var canClone: Bool? = nil
+    var outside: [String]? = nil
 }
 
 struct AddResult: Decodable {
@@ -306,6 +307,16 @@ struct Detail: View {
         VStack(spacing: 0) {
             header
             Form {
+                if let parts = app.outside, !parts.isEmpty {
+                    Section {
+                        Label(parts.joined(separator: t("、", ", ")), systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange).lineLimit(2)
+                    } header: { Text(t("结界外的组件", "Components outside Kekkai")) } footer: {
+                        Text(t("由系统直接启动，不受结界限制。可在“系统设置 › 通用 › 登录项与扩展”中关闭。",
+                               "Started by macOS directly and not restricted by Kekkai. Turn them off in System Settings › General › Login Items & Extensions."))
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Section {
                     if app.allow.isEmpty {
                         Text(t("无", "None")).foregroundStyle(.secondary)
@@ -349,12 +360,12 @@ struct Detail: View {
                     }
                 } header: { Text(t("数据", "Data")) } footer: {
                     Text(!(app.sandboxed || app.mode == "space")
-                         ? t("该软件以书签记录数据位置，移动后书签失效，因此在原位置运行。", "This app records its data location in a bookmark that breaks if the data moves, so it runs in place.")
+                         ? t("该软件以书签记录数据位置，因此在原位置运行。", "This app records its data location in a bookmark, so it runs in place.")
                          : app.sandboxed
-                         ? t("首次打开时已复制原 App 的数据，此后两者相互独立。导入将以原 App 的当前数据替换结界中的数据。登录状态由系统按签名保存，无法导入，需重新登录。",
-                             "The original app's data was copied at first launch; the two are independent after that. Importing replaces the data in Kekkai with the original's current data. Sign-in state is stored by macOS per signature and can't be imported; sign in again.")
-                         : t("首次打开时已复制原 App 的数据，此后两者相互独立。导入将以原 App 的当前数据替换结界中的数据。",
-                             "The original app's data was copied at first launch; the two are independent after that. Importing replaces the data in Kekkai with the original's current data."))
+                         ? t("导入将以原 App 的当前数据替换结界中的数据。登录状态无法导入。",
+                             "Importing replaces the data in Kekkai with the original app's current data. Sign-in state can't be imported.")
+                         : t("导入将以原 App 的当前数据替换结界中的数据。",
+                             "Importing replaces the data in Kekkai with the original app's current data."))
                         .foregroundStyle(.secondary)
                 }
 
@@ -381,8 +392,7 @@ struct Detail: View {
                         Text(t("添加时自动开启：\(auto.joined(separator: "、"))（关闭后无法启动）。", "Turned on automatically at first launch: \(auto.joined(separator: ", ")). It failed to start without them."))
                             .foregroundStyle(.orange)
                     }
-                    Text(t("开启即允许。默认全部关闭，更改在下次打开时生效。剪贴板设为“可写入，粘贴时可读”时，软件可随时写入，仅在按下 ⌘V 或选择“粘贴”后可读取。“本机端口”指本机其他程序提供的网络服务，如代理面板和开发服务器；关闭时仅可连接结界为其分配的端口，可注入的软件自行打开的端口将移入该范围。经它打开的其他 App 不受结界限制。",
-                           "On means allowed. Everything is off by default; changes take effect next launch. With the clipboard set to Write, read on paste, the app can write at any time and read only after you press ⌘V or choose Paste. Ports on this Mac are network services provided by other programs, such as proxy dashboards and development servers. When off, the app can connect only to the ports Kekkai assigns it; for injectable apps, ports the app opens itself are moved into that range. Apps it opens run outside Kekkai."))
+                    Text(t("开启即允许，更改在下次打开时生效。经它打开的其他 App 不受结界限制。", "On means allowed. Changes take effect next launch. Apps it opens run outside Kekkai."))
                         .foregroundStyle(.secondary)
                 }
 
@@ -414,18 +424,16 @@ struct Detail: View {
                     }
                 } header: { Text(t("伪装", "Disguise")) } footer: {
                     if app.canClone ?? false {
-                        Text(t("该软件的签名不允许注入。关闭时，设备信息仅能屏蔽，无法替换，显示器序列号无法屏蔽。开启后将运行去除强化运行时并临时签名的副本（APFS 克隆，几乎不占用额外空间），设备信息、端口和剪贴板按可注入软件处理。摄像头等系统权限需重新授权；原 App 更新后，副本将在下次打开时重建。",
-                               "This app's signature doesn't allow injection. When off, device details can only be blocked, not replaced, and the display serial can't be blocked. When on, Kekkai runs an ad-hoc signed copy without the hardened runtime (an APFS clone that uses almost no additional space), handled as injectable for device identity, ports and the clipboard. Camera and similar permissions must be granted again. The copy is rebuilt at next launch after the original app updates."))
+                        Text(t("该软件的签名不允许注入，设备信息仅能屏蔽。开启后运行可注入的副本，系统权限需重新授权。", "This app's signature doesn't allow injection, so device information can only be blocked. When on, Kekkai runs an injectable copy; system permissions must be granted again."))
                             .foregroundStyle(.secondary)
                     }
-                    Text(t("结界内时间：\(clock(app.tz))。序列号、硬件 UUID、网卡地址和电脑名为结界为该软件单独生成的值，各软件互不相同；机型、系统版本等非唯一信息保持不变。重置设备身份后，该软件会将本机识别为新设备，账号可能需要重新验证；软件自行保存的设备标识需清除数据后失效。更改在下次打开时生效。",
-                           "Time inside: \(clock(app.tz)). The serial number, hardware UUID, network addresses and computer name it sees are a set Kekkai made for this app alone; it can't read the real ones. Things many Macs share, such as model and macOS version, are left as is. After New Identity it treats this as a new Mac and your account may ask you to verify again; device IDs the app saved itself go only when you clear its data. Changes apply next launch."))
+                    Text(t("结界内时间：\(clock(app.tz))。序列号、硬件 UUID、网卡地址和电脑名为该软件专用，各软件互不相同。", "Time inside: \(clock(app.tz)). The serial number, hardware UUID, network addresses and computer name are unique to this app."))
                         .foregroundStyle(.secondary)
                 }
                 .confirmationDialog(t("重置设备身份？", "Reset device identity?"), isPresented: $renewing) {
                     Button(t("重置设备身份", "Reset Device Identity")) { set(["new-identity", app.id]) { $0.identity = nil } }
                 } message: {
-                    Text(t("下次打开时将使用新的序列号、硬件 UUID 和网卡地址。", "Next launch it will see another Mac's serial number, hardware UUID and network addresses."))
+                    Text(t("下次打开时将使用新的设备信息，账号可能需要重新验证。软件自行保存的设备标识需清除数据后失效。", "New device information is used next launch, and accounts may ask for verification again. Device IDs the app saved itself remain until its data is cleared."))
                 }
 
                 Section {
@@ -436,8 +444,7 @@ struct Detail: View {
                         Button(t("本地网络", "Local Network")) { openPrivacy("Privacy_LocalNetwork") }
                     }
                 } header: { Text(t("由 macOS 管理的权限", "Permissions managed by macOS")) } footer: {
-                    Text(t("在系统设置中按 App 设置。“本地网络”位于“隐私与安全性”列表中，控制局域网设备的访问。",
-                           "Set per app in System Settings. Local Network, listed on the Privacy & Security page, controls access to devices on your network."))
+                    Text(t("在系统设置中按 App 授权。", "Granted per app in System Settings."))
                         .foregroundStyle(.secondary)
                 }
 
@@ -629,7 +636,7 @@ struct BlockLogSection: View {
                 ProgressView().controlSize(.small)
             }
         } header: { Text(t("拦截记录", "Block Log")) } footer: {
-            Text(app.inside ? t("实时更新，以上请求均已拦截。排在最前的几项可能为正常运行所需，可逐项放行。越权：超出其功能所需的探查；留意：可能正常，但值得关注；常规：系统框架自动发出，不影响使用。", "Updates live. Everything above is blocked. The first items may be needed for the app to work and can be allowed one by one. Overreach: probing beyond what the app is for. Worth a look: may be normal, but you should know. Routine: sent by system frameworks on their own, harmless to block.") : t("以上请求均已拦截。在结界中运行时实时更新。", "Everything above is blocked. Updates live while the app runs in Kekkai."))
+            Text(app.inside ? t("实时更新。排在前面的项目可能为正常运行所需，可逐项放行。", "Updates live. Items near the top may be needed for the app to work and can be allowed individually.") : t("在结界中运行时实时更新。", "Updates live while the app runs in Kekkai."))
                 .foregroundStyle(.secondary)
         }
         .task(id: "\(app.id) \(app.inside)") {
@@ -720,15 +727,15 @@ struct LocationPicker: View {
                     Button(t("使用", "Use")) { if let p = typedPlace { done(p); dismiss() } }.disabled(typedPlace == nil)
                 }
             } header: { Text(t("坐标", "Coordinates")) } footer: {
-                Text(t("WGS-84 坐标，与 GPS 及国际版地图一致。中国大陆地图 App 使用的 GCJ-02 坐标存在数百米偏差。",
-                       "WGS-84, as used by GPS and most maps outside mainland China. GCJ-02 coordinates from mainland Chinese map apps differ by several hundred meters."))
+                Text(t("WGS-84 坐标。中国大陆地图 App 的坐标有数百米偏差。",
+                       "WGS-84. Coordinates from mainland Chinese map apps are offset by several hundred meters."))
                     .foregroundStyle(.secondary)
             }
             Section {
                 Button(t("在地图上选择…", "Choose on a Map…")) { online = true }
             } footer: {
-                Text(t("地图、搜索和地名由 Apple 地图提供，需要联网，搜索内容和所选位置将发送给 Apple。结界的其他功能均不联网。",
-                       "The map, search and place names are provided by Apple Maps over the internet; search terms and the selected location are sent to Apple. No other part of Kekkai connects to the internet."))
+                Text(t("需要联网，搜索内容和所选位置将发送给 Apple。",
+                       "Requires the internet; searches and the selected location are sent to Apple."))
                     .foregroundStyle(.secondary)
             }
         }
@@ -817,7 +824,7 @@ struct NeverList: View {
                 if panel.runModal() == .OK { panel.urls.forEach { store.loadNever(["never", "add", $0.path]) } }
             }
         } header: { Text(t("必定隔离的文件夹", "Always-blocked folders")) } footer: {
-            Text(t("从结界打开的软件均无法访问以下文件夹，优先于单个软件的放行设置。", "Apps opened from Kekkai can never reach these folders, even ones you allowed for a single app."))
+            Text(t("所有软件均无法访问以下文件夹，优先于单个软件的设置。", "No app in Kekkai can access these folders, regardless of per-app settings."))
                 .foregroundStyle(.secondary)
         }
     }
@@ -838,7 +845,7 @@ struct SettingsView: View {
                         NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: "/Users/Shared/Kekkai.noindex")
                     }
                 } header: { Text(t("结界文件夹", "Kekkai folders")) } footer: {
-                    Text(t("各软件的数据、副本和钥匙串按软件分别存放于此。文件夹名带 .noindex 后缀，不被聚焦收录。", "Each app's data, copy and keychain live here, one folder per app. The .noindex suffix keeps Spotlight out."))
+                    Text(t("各软件的数据、副本和钥匙串分别存放于此，不被聚焦收录。", "Each app's data, copy and keychain are stored here, excluded from Spotlight."))
                         .foregroundStyle(.secondary)
                 }
                 Section {
@@ -1041,8 +1048,8 @@ struct AddSheet: View {
             } else {
                 Text(t("正在试运行 \(name)", "Trying \(name) in Kekkai")).font(.title3.weight(.semibold))
                 ProgressView().controlSize(.small)
-                Text(t("先在所有权限关闭的状态下运行；如无法正常运行，将逐项检测必需权限。通常约 20 秒，最长约 2 分钟。",
-                       "It opens for a moment. If it holds up with every permission off, it's added; if not, Kekkai finds the permissions it can't do without. Usually about 20 seconds, at most about two minutes."))
+                Text(t("先关闭所有权限运行，无法运行时逐项检测必需权限。约需 20 秒，最长 2 分钟。",
+                       "Runs with all permissions off first, then checks which ones are required if needed. About 20 seconds, up to 2 minutes."))
                     .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
@@ -1214,7 +1221,7 @@ let helpSections: [(String, [String])] = isChinese ? [
     ("隔离范围", [
         "文件：仅可访问自身数据和已批准的文件夹，其他位置均显示为不存在。",
         "设备信息：序列号、硬件 UUID、网卡地址等替换为该 App 专用的值，各 App 之间互不相同。",
-        "其他程序：无法查看其他进程，无法连接本机其他程序提供的端口，无法打开其他 App。",
+        "其他程序：无法查看其他进程、运行中的软件和窗口，无法用聚焦搜索列出已装软件，无法连接本机其他程序提供的端口，无法打开其他 App。",
         "剪贴板：默认可随时写入，仅在按下 ⌘V 或选择“粘贴”后可读取。",
     ]),
     ("数据与登录", [
@@ -1224,13 +1231,20 @@ let helpSections: [(String, [String])] = isChinese ? [
     ]),
     ("权限", [
         "设置中的权限默认全部关闭，开启即允许，更改在下次打开 App 时生效。",
+        "本机端口：指本机其他程序提供的网络服务，如代理面板和开发服务器。关闭时仅可连接结界为其分配的端口；可注入的 App 自行打开的端口将移入该范围。",
+        "打开其他 App 与链接：开启后，经它打开的 App 和网页不受结界限制。",
+        "拦截记录分三档：越权为超出其功能所需的探查；留意为可能正常但值得关注的请求；常规为系统框架自动发出的请求，不影响使用。",
         "App 功能异常时，请先查看拦截记录。排在前面且标有“本次运行”的项目最可能相关，可逐项放行。",
     ]),
     ("常见问题", [
         "无法添加：App Store 付费 App 会校验购买凭证，副本无法通过校验，因此不受支持。其他原因见提示信息。",
         "导入失败：请在“系统设置 › 隐私与安全性 › 完全磁盘访问权限”中开启“结界”。",
         "摄像头、麦克风、定位：由 macOS 管理，可通过设置底部的按钮前往对应的系统设置。",
-        "伪装不完整：部分 App 的签名不允许注入，设备信息仅能屏蔽、无法替换。可在“伪装”一栏开启“以可注入副本运行”。",
+        "以可注入副本运行：部分 App 的签名不允许注入。添加这类 App 时，结界先运行去除强化运行时的 APFS 克隆副本（几乎不占用额外空间），试运行失败才改用原版。原版无法替换设备信息，且可看到运行中的软件、窗口列表、显示器序列号和电脑名。原 App 更新后，副本在下次打开时重建；副本功能异常时，可在“伪装”一栏关闭。",
+        "结界外的组件：网盘同步扩展、登录项、特权助手等由系统直接启动，不受结界限制。结界禁止 App 在其中注册此类组件；已存在的会列在设置顶部，可在“系统设置 › 通用 › 登录项与扩展”中关闭。",
+        "原地运行：少数 App（如腾讯会议官网版）以书签记录数据位置，只能在原位置运行，此时主目录路径中的账户名对其可见。",
+        "电脑名：不可注入的 App 可读取真实电脑名。如电脑名包含本人姓名，建议在“系统设置 › 通用 › 关于本机”中修改。",
+        "重置设备身份：该 App 将把本机识别为新设备，账号可能需要重新验证；App 自行保存的设备标识需清除数据后失效。机型、系统版本等非唯一信息保持不变。",
         "时区：可按 App 单独设置。使用代理的 App，建议将时区设为代理出口所在地区；两者不一致时更易被识别。",
     ]),
     ("隐私", [
@@ -1246,7 +1260,7 @@ let helpSections: [(String, [String])] = isChinese ? [
     ("What Is Isolated", [
         "Files: only the app's own data and approved folders are accessible. All other locations appear not to exist.",
         "Device information: the serial number, hardware UUID, network addresses and similar values are replaced with values unique to the app.",
-        "Other programs: the app can't see other processes, connect to ports opened by other programs on this Mac, or open other apps.",
+        "Other programs: the app can't see other processes, running apps or their windows, list installed apps through Spotlight, connect to ports opened by other programs on this Mac, or open other apps.",
         "Clipboard: by default the app can write at any time and read only after you press ⌘V or choose Paste.",
     ]),
     ("Data and Sign-In", [
@@ -1256,13 +1270,20 @@ let helpSections: [(String, [String])] = isChinese ? [
     ]),
     ("Permissions", [
         "All permissions in Settings are off by default. Turning one on allows it; changes take effect the next time the app opens.",
+        "Ports on this Mac: network services provided by other programs, such as proxy dashboards and development servers. When off, the app can connect only to the ports Kekkai assigns it; for injectable apps, ports the app opens itself are moved into that range.",
+        "Opening other apps and links: when on, apps and web pages it opens run outside Kekkai.",
+        "The Block Log has three levels: Overreach is probing beyond what the app needs; Worth a look may be normal but deserves attention; Routine is sent automatically by system frameworks and is harmless to block.",
         "If the app doesn't work as expected, check the Block Log first. Items near the top marked This Run are the most likely cause and can be allowed individually.",
     ]),
     ("Troubleshooting", [
         "Can't add an app: paid App Store apps verify their purchase receipt, which a copy can't pass, so they aren't supported. Other reasons are shown in the message.",
         "Import fails: turn on Kekkai in System Settings › Privacy & Security › Full Disk Access.",
         "Camera, microphone and location: managed by macOS. Use the buttons at the bottom of an app's settings to open the relevant System Settings pane.",
-        "Incomplete disguise: some apps' signatures don't allow injection, so device information can be blocked but not replaced. Turn on Run as an injectable copy in Disguise.",
+        "Run as an injectable copy: some apps' signatures don't allow injection. When adding such an app, Kekkai first runs an APFS clone without the hardened runtime (using almost no additional space) and uses the original only if the copy fails its trial run. The original can't have its device information replaced and can see running apps, the window list, the display serial and the computer name. The copy is rebuilt at next launch after the original app updates; if it misbehaves, turn it off in Disguise.",
+        "Components outside Kekkai: sync extensions, login items, privileged helpers and similar components are started by macOS and aren't restricted by Kekkai. Apps in Kekkai can't register them; existing ones are listed at the top of the app's settings and can be turned off in System Settings › General › Login Items & Extensions.",
+        "Running in place: a few apps, such as Tencent Meeting's direct download, record their data location in bookmarks and must run in place. Your account name in the home folder path is then visible to them.",
+        "Computer name: apps that can't be injected can read the real computer name. If it contains your name, change it in System Settings › General › About.",
+        "Reset device identity: the app treats this Mac as a new device, and accounts may ask for verification again. Device IDs the app saved itself remain until its data is cleared. Non-unique details such as model and macOS version are unchanged.",
         "Time zone: set per app. For an app that uses a proxy, set the time zone to the proxy's region; a mismatch makes identification easier.",
     ]),
     ("Privacy", [

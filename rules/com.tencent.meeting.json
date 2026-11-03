@@ -5,7 +5,8 @@
  ],
  "system_regex": [
   "^/private/tmp(/[0-9a-f]+)?$",
-  "^~/[0-9a-f]+$"
+  "^~/[0-9a-f]+$",
+  "^/private/tmp/com\\.tencent\\.meeting\\.[0-9A-Fa-f]+$"
  ],
  "mode": "real"
 }

@@ -115,6 +115,11 @@ def entitlements(app):
         return {}
 
 
+def quarantined(app):
+    """从网上下载的软件带隔离标记。它的临时签名副本过不了门禁（实测 ASP 拒绝，OS_REASON_EXEC），不绕过门禁，所以不用副本"""
+    return subprocess.run(["xattr", "-p", "com.apple.quarantine", app], capture_output=True).returncode == 0
+
+
 def injectable(app):
     """签名允许注入才注入：强化运行时要同时许可环境变量和外来库，否则系统会拒绝启动或忽略。"""
     out = subprocess.run(["codesign", "-dv", app], capture_output=True, text=True).stderr
@@ -418,6 +423,15 @@ def common_rules(rule, conf, mode="space"):
         procs += [] if conf.get("inject") else ['(sysctl-name-prefix "kern.proc.pid")']
         L += [";; 看不到其他进程", "(deny process-info* (target others))", "(deny process-info-listpids)",
               f"(deny sysctl-read {' '.join(procs)})"]
+    # 登录项、后台项目和特权助手由 launchd 在结界外启动，等于逃出结界（实测沙盒内 SMAppService 注册登录项成功）；
+    # 申请管理员权限同理。挡住后注册返回错误、不弹密码框，要装助手请在结界外进行
+    L += [";; 不许注册登录项、后台项目和特权助手，不许申请管理员权限",
+          '(deny mach-lookup (global-name "com.apple.xpc.smd") (global-name-prefix "com.apple.backgroundtaskmanagement")',
+          '  (global-name "com.apple.authd") (global-name "com.apple.security.authtrampoline"))']
+    if not rule.get("allow_spotlight"):
+        # 聚焦搜索由系统服务代查，不过文件规则：实测挡住“应用程序”文件夹后仍能搜出 /Applications 里的全部软件。
+        # 代价是软件内和打开／存储面板里的搜索失效
+        L += [";; 不许用聚焦搜索列出已安装的软件和文件", '(deny mach-lookup (global-name "com.apple.metadata.mds"))']
     if not opt(rule, conf, "allow_localhost"):
         # 本机上别的程序开的端口（代理面板、开发服务器、其他软件的本地接口）不让它碰；系统代理的端口留着，不然上不了网。
         # 它只能连分给它的那组端口：能注入的软件自己开端口时，注入库把端口挪进这组（见 inject.c）。
@@ -943,8 +957,7 @@ def log_status(app, bundle_id, history):
         # 只在它异常退出时，把退出前被挡、又能放行的请求列出来让你决定；平时都折在分组里
         r["ask"] = crashed and r["recent"] and bool(r["grant"]) and not r["normal"] and (cat in ASKS or cat == "appdata")
     # 从网上下载、没经苹果公证的软件，macOS 的门禁在启动时就拦下（实测 OS_REASON_EXEC）；要不要放行是你的决定
-    quarantined = subprocess.run(["xattr", "-p", "com.apple.quarantine", app], capture_output=True).returncode == 0
-    gatekeeper = bool(exited) and code == "OS_REASON_EXEC" and quarantined
+    gatekeeper = bool(exited) and code == "OS_REASON_EXEC" and quarantined(app)
     # 退出码 173 是 App Store 软件要求重新校验购买凭证，重签的副本过不了
     receipt = bool(exited) and code == "173"
     return {"running": running, "gatekeeper": gatekeeper, "receipt": receipt, "started": run_start or None, "exited": exited or None, "seconds": seconds,
@@ -963,7 +976,7 @@ def run(app, learn=False):
     fake = conf.get("location")
     groups = app_groups(app)
     # 虚拟定位和设备伪装要注入，原版的强化运行时不允许，用去掉强化运行时的副本
-    if sandboxed or (fake or opt(rule, conf, "clone")) and not injectable(app):
+    if sandboxed or (fake or opt(rule, conf, "clone")) and not injectable(app) and not quarantined(app):
         app = local_copy(app, bundle_id)
     binary = f"{app}/Contents/MacOS/{exe}"
     if subprocess.run(["pgrep", "-f", "^" + re.escape(binary)], capture_output=True).returncode == 0:
@@ -1148,10 +1161,25 @@ def add(app, wait=20):
         needed = settings().get(bundle_id, {}).get("auto_enabled", []) if ok else []
         print(json.dumps({"ok": ok, "reason": reason, "autoEnabled": needed}, ensure_ascii=False))
 
+    # 签名不许注入的软件先试可注入副本：电脑名、显示器序列号、运行中的软件这些沙盒挡不住的，副本能换成假的。
+    # 副本起不来再回到原版；你在设置里明确选过的不动
+    sandboxed = bool(entitlements(app).get("com.apple.security.app-sandbox"))
+    clone_first = not sandboxed and not injectable(app) and not quarantined(app) and "clone" not in settings().get(bundle_id, {})
+    if clone_first:
+        set_field(bundle_id, "clone", True)
     msg = run(app)
+    if not msg:
+        tune(app, wait)
+    if clone_first and not job_state(bundle_id)[0] and not (STATE / f"{bundle_id}.stopped").exists():
+        stop(app)
+        shutil.rmtree(space / "Applications" / Path(app).name, ignore_errors=True)
+        (space / "Applications" / (Path(app).name + ".source")).unlink(missing_ok=True)
+        set_field(bundle_id, "clone", False)
+        msg = run(app)
+        if not msg:
+            tune(app, wait)
     if msg:
         return result(False, msg)
-    tune(app, wait)
     if job_state(bundle_id)[0]:
         return result(True)
     if (STATE / f"{bundle_id}.stopped").exists():
@@ -1212,10 +1240,52 @@ def reset(app):
         shutil.rmtree(space)
 
 
+def outside_parts(app, bundle_id, procs, jobs):
+    """它在结界外的组件：不是结界启动的进程（如网盘的同步扩展、开机启动的登录项），和装在系统里的常驻任务（如特权助手）。
+    这些由 launchd 或系统直接启动，结界管不到，只能告诉你。procs 是 {pid: (ppid, 路径)}"""
+    job = next((int(ln.split("\t")[0]) for ln in jobs.splitlines()
+                if ln.endswith("\t" + label(bundle_id)) and ln.split("\t")[0].isdigit()), None)
+
+    def inside(pid):
+        while pid > 1:
+            if pid == job:
+                return True
+            pid = procs.get(pid, (0, ""))[0]
+        return False
+    import ctypes
+    check = ctypes.CDLL(None).sandbox_check
+    check.argtypes, check.restype = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int], ctypes.c_int
+    copy = space_of(bundle_id) / "Applications" / Path(app).name
+    uses_copy = copy.exists()
+
+    def outside(pid, path):
+        if inside(pid):
+            return False
+        # 扩展由系统启动；用副本时原版的进程都不是结界开的；脱离父进程（ppid 1）但仍在沙盒里的，是结界开的
+        return ".appex/" in path or (uses_copy and path.startswith(app + "/")) or check(pid, None, 0) == 0
+    found = {Path(path).name for pid, (_, path) in procs.items()
+             if path.startswith((app + "/", str(copy) + "/")) and outside(pid, path)}
+    vendor = ".".join(bundle_id.split(".")[:2]).lower()
+    if vendor.startswith("com.apple") or "." not in vendor:
+        return sorted(found)
+    for d in (f"{HOME}/Library/LaunchAgents", "/Library/LaunchAgents", "/Library/LaunchDaemons", "/Library/PrivilegedHelperTools"):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        found |= {n.removesuffix(".plist") for n in names if n.lower().startswith(vendor + ".")}
+    return sorted(found)
+
+
 def list_apps():
     cache_path = STATE / "entitlements-cache.json"
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
     procs = subprocess.run(["ps", "-axo", "comm="], capture_output=True, text=True).stdout
+    tree = {}
+    for ln in subprocess.run(["ps", "-axo", "pid=,ppid=,comm="], capture_output=True, text=True).stdout.splitlines():
+        f = ln.split(None, 2)
+        if len(f) == 3 and f[0].isdigit() and f[1].isdigit():
+            tree[int(f[0])] = (int(f[1]), f[2])
     jobs = subprocess.run(["launchctl", "list"], capture_output=True, text=True).stdout
     conf, out = settings(), []
     added = set(conf.get("_added", []))
@@ -1235,13 +1305,17 @@ def list_apps():
                               "perm_keys": [k for k in PERMISSIONS if e.get(k)]}
             if "inj" not in cache[key]:  # 自带苹果沙盒的软件跑的是重签的副本，副本能注入
                 cache[key]["inj"] = cache[key]["sandboxed"] or injectable(str(app))
+            if "q" not in cache[key]:
+                cache[key]["q"] = quarantined(str(app))
             inside = any(label(bundle_id) == ln.split("\t")[-1] and not ln.startswith("-") for ln in jobs.splitlines())
             c = conf.get(bundle_id, {})
             space = space_of(bundle_id)
+            inj = cache[key]["inj"] or (opt(load_rule(bundle_id), c, "clone") and not cache[key]["q"])  # 带隔离标记的不用副本
             out.append({"id": bundle_id, "name": app.stem, "path": str(app), "sandboxed": cache[key]["sandboxed"],
                         "perms": [t(PERMISSIONS[k], PERMISSIONS_EN[k]) for k in cache[key]["perm_keys"]], "inside": inside, "running": f"{app}/Contents/MacOS/{exe}" in procs,
                         "tz": c.get("tz"), "mode": effective_mode(bundle_id, c, load_rule(bundle_id)),
-                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c, cache[key]["inj"] or opt(load_rule(bundle_id), c, "clone")), "clipboard": clipboard_mode(c, cache[key]["inj"] or opt(load_rule(bundle_id), c, "clone")), "injectable": cache[key]["inj"] or opt(load_rule(bundle_id), c, "clone"), "canClone": not cache[key]["inj"], "location": c.get("location"), "identity": c.get("identity"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "options": {k: opt(load_rule(bundle_id), c, v) for k, v in OPTIONS.items()}, "autoEnabled": c.get("auto_enabled", []), "tuned": bool(c.get("tuned")), "reviewed": bool(c.get("decided")), "space": str(space), "hasSpace": space.exists(), "added": str(app) in added})
+                        "bringOld": bool(c.get("bring_old_data")), "block": blocked_devices(c, inj), "clipboard": clipboard_mode(c, inj), "injectable": inj, "canClone": not cache[key]["inj"] and not cache[key]["q"], "location": c.get("location"), "identity": c.get("identity"), "allow": c.get("allow", []), "allowOpen": bool(c.get("allow_open")), "options": {k: opt(load_rule(bundle_id), c, v) for k, v in OPTIONS.items()}, "autoEnabled": c.get("auto_enabled", []), "tuned": bool(c.get("tuned")), "reviewed": bool(c.get("decided")), "space": str(space), "hasSpace": space.exists(), "added": str(app) in added,
+                        "outside": outside_parts(str(app), bundle_id, tree, jobs) if str(app) in added else []})
     if "_added" not in conf:  # 有“添加”之前就在结界里用过的软件，直接算已添加
         conf["_added"] = sorted(e["path"] for e in out if e["hasSpace"] or e["id"] in conf)
         save_settings(conf)

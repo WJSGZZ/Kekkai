@@ -134,6 +134,8 @@ static void guard_clipboard(void) {
     hook("NSApplication", "sendAction:to:from:", (IMP)g_action, &orig_action);
 }
 
+static void hide_apps(void);
+
 __attribute__((constructor)) static void setup(void) {
     for (int i = 0; carry[i]; i++) {
         const char *v = getenv(carry[i]);
@@ -151,6 +153,7 @@ __attribute__((constructor)) static void setup(void) {
     if ((v = getenv("KEKKAI_PORTMAP"))) portmap = strdup(v);
     if (getenv("KEKKAI_PASTE")) guard_clipboard();
     hide_procs = getenv("KEKKAI_PROCS") != NULL;
+    if (hide_procs) hide_apps();
     const char *h = getenv("KEKKAI_HOME");
     if (!h) return;
     home = strdup(h);
@@ -390,6 +393,119 @@ INTERPOSE(my_proc_listallpids, proc_listallpids)
 INTERPOSE(my_proc_pidinfo, proc_pidinfo)
 INTERPOSE(my_proc_pidpath, proc_pidpath)
 INTERPOSE(my_proc_name, proc_name)
+
+// 运行中的软件和窗口：来自启动服务和窗口服务器，沙盒挡不了（实测结界里能列出全部 113 个软件和各窗口的所属软件）。
+// 只留它自己：同一进程、它开的子进程，或同一个软件 ID（多开、辅助程序）
+static CFStringRef own_id(void) {
+    static CFStringRef id;
+    if (!id) {
+        CFBundleRef b = CFBundleGetMainBundle();
+        CFStringRef s = b ? CFBundleGetIdentifier(b) : NULL;
+        id = s ? CFRetain(s) : CFSTR("");
+    }
+    return id;
+}
+
+static int own_app(id app) {
+    pid_t pid = ((pid_t (*)(id, SEL))objc_msgSend)(app, sel_registerName("processIdentifier"));
+    if (family(pid)) return 1;
+    CFStringRef b = (CFStringRef)((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("bundleIdentifier"));
+    return b && CFStringGetLength(own_id()) && CFEqual(b, own_id());
+}
+
+static id autoreleased(CFTypeRef v) { return ((id (*)(id, SEL))objc_msgSend)((id)v, sel_registerName("autorelease")); }
+
+static id only_own(id list) {
+    CFMutableArrayRef out = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+    for (CFIndex i = 0, n = list ? CFArrayGetCount((CFArrayRef)list) : 0; i < n; i++) {
+        id a = (id)CFArrayGetValueAtIndex((CFArrayRef)list, i);
+        if (own_app(a)) CFArrayAppendValue(out, a);
+    }
+    return autoreleased(out);
+}
+
+static IMP orig_running, orig_with_id, orig_with_pid, orig_front, orig_menubar;
+static id g_running(id self, SEL s) { return only_own(((id (*)(id, SEL))orig_running)(self, s)); }
+static id g_with_id(id self, SEL s, id bid) { return only_own(((id (*)(id, SEL, id))orig_with_id)(self, s, bid)); }
+static id g_with_pid(id self, SEL s, pid_t pid) {
+    id a = ((id (*)(id, SEL, pid_t))orig_with_pid)(self, s, pid);
+    return a && own_app(a) ? a : nil;
+}
+// 前台软件说明你此刻在用什么，不是它自己就答没有
+static id g_front(id self, SEL s) {
+    id a = ((id (*)(id, SEL))orig_front)(self, s);
+    return a && own_app(a) ? a : nil;
+}
+static id g_menubar(id self, SEL s) {
+    id a = ((id (*)(id, SEL))orig_menubar)(self, s);
+    return a && own_app(a) ? a : nil;
+}
+
+static void hook_class(const char *cls, const char *sel, IMP mine, IMP *orig) {
+    Class c = objc_getClass(cls);
+    Method m = c ? class_getClassMethod(c, sel_registerName(sel)) : NULL;
+    if (m) *orig = method_setImplementation(m, mine);
+}
+
+static void hide_apps(void) {
+    if (!objc_getClass("NSWorkspace")) return;
+    hook("NSWorkspace", "runningApplications", (IMP)g_running, &orig_running);
+    hook("NSWorkspace", "frontmostApplication", (IMP)g_front, &orig_front);
+    hook("NSWorkspace", "menuBarOwningApplication", (IMP)g_menubar, &orig_menubar);
+    hook_class("NSRunningApplication", "runningApplicationsWithBundleIdentifier:", (IMP)g_with_id, &orig_with_id);
+    hook_class("NSRunningApplication", "runningApplicationWithProcessIdentifier:", (IMP)g_with_pid, &orig_with_pid);
+}
+
+static int own_window(CFDictionaryRef w) {
+    CFNumberRef n = CFDictionaryGetValue(w, kCGWindowOwnerPID);
+    pid_t pid = 0;
+    return n && CFNumberGetValue(n, kCFNumberIntType, &pid) && family(pid);
+}
+
+static CFArrayRef my_CGWindowListCopyWindowInfo(CGWindowListOption o, CGWindowID rel) {
+    CFArrayRef all = CGWindowListCopyWindowInfo(o, rel);
+    if (!hide_procs || !all) return all;
+    CFMutableArrayRef out = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+    for (CFIndex i = 0, n = CFArrayGetCount(all); i < n; i++) {
+        CFDictionaryRef w = CFArrayGetValueAtIndex(all, i);
+        if (own_window(w)) CFArrayAppendValue(out, w);
+    }
+    CFRelease(all);
+    return out;
+}
+
+// 只给编号的那一版：按编号再查一次所属进程
+static CFArrayRef my_CGWindowListCreate(CGWindowListOption o, CGWindowID rel) {
+    CFArrayRef ids = CGWindowListCreate(o, rel);
+    if (!hide_procs || !ids) return ids;
+    CFArrayRef info = CGWindowListCreateDescriptionFromArray(ids);
+    CFMutableArrayRef out = CFArrayCreateMutable(NULL, 0, NULL);  // 元素是窗口编号，不是 CF 对象
+    for (CFIndex i = 0, n = info ? CFArrayGetCount(info) : 0; i < n; i++) {
+        CFDictionaryRef w = CFArrayGetValueAtIndex(info, i);
+        CFNumberRef num = CFDictionaryGetValue(w, kCGWindowNumber);
+        uint32_t wid;
+        if (own_window(w) && num && CFNumberGetValue(num, kCFNumberSInt32Type, &wid)) CFArrayAppendValue(out, (const void *)(uintptr_t)wid);
+    }
+    if (info) CFRelease(info);
+    CFRelease(ids);
+    return out;
+}
+
+static CFArrayRef my_CGWindowListCreateDescriptionFromArray(CFArrayRef ids) {
+    CFArrayRef all = CGWindowListCreateDescriptionFromArray(ids);
+    if (!hide_procs || !all) return all;
+    CFMutableArrayRef out = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+    for (CFIndex i = 0, n = CFArrayGetCount(all); i < n; i++) {
+        CFDictionaryRef w = CFArrayGetValueAtIndex(all, i);
+        if (own_window(w)) CFArrayAppendValue(out, w);
+    }
+    CFRelease(all);
+    return out;
+}
+
+INTERPOSE(my_CGWindowListCopyWindowInfo, CGWindowListCopyWindowInfo)
+INTERPOSE(my_CGWindowListCreate, CGWindowListCreate)
+INTERPOSE(my_CGWindowListCreateDescriptionFromArray, CGWindowListCreateDescriptionFromArray)
 
 // ---- 假设备 ----
 

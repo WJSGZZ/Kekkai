@@ -55,7 +55,7 @@ flowchart LR
 - **Injected library.** DYLD interposition answers on the system's behalf: a fake user, a per-app device identity, port remapping, a clipboard read gate and a process table that contains only the app. Works only for apps whose signature allows injection.
 - **Kekkai folder.** `/Users/Shared/Kekkai.noindex/<bundle id>`, with `HOME` pointed at it. On first launch Kekkai finds the app's existing data by bundle ID, app group and same-named data folders, and brings it in as an APFS clone; the original stays untouched.
 
-Apps with the hardened runtime and library validation can't be injected, and rely on the sandbox alone unless you turn on *Run as an injectable copy*: Kekkai then runs an ad-hoc signed APFS clone without the hardened runtime, which costs almost no disk space (about 7 MB for a 480 MB Electron app) and gets everything in the Injectable column. Apps that ship with Apple's App Sandbox, such as QQ and WeChat, run as an unsandboxed, ad-hoc re-signed clone that can be injected ([details](#apps-that-ship-with-apples-sandbox)).
+Apps with the hardened runtime and library validation can't be injected directly. When such an app is added, Kekkai first tries *Run as an injectable copy* and falls back to the original only if the copy fails its trial run. The copy is an ad-hoc signed APFS clone without the hardened runtime, costs almost no disk space (about 7 MB for a 480 MB Electron app), and gets everything in the Injectable column. The switch stays in Disguise. Apps downloaded from the internet carry macOS's quarantine flag, and an ad-hoc signed copy of them can't pass Gatekeeper, so they always run as the original. Apps that ship with Apple's App Sandbox, such as QQ and WeChat, run as an unsandboxed, ad-hoc re-signed clone that can be injected ([details](#apps-that-ship-with-apples-sandbox)).
 
 ## What an app sees
 
@@ -67,9 +67,9 @@ Apps with the hardened runtime and library validation can't be injected, and rel
 | **Network location** | ARP and neighbor entries are stripped from the routing table; `arp`, `netstat`, `ipconfig` and similar tools can't run | The IPv6 neighbor table can't be dumped (macOS already withholds IPv4 ARP entries from ordinary apps); the same tools can't run |
 | **Local ports** | A private block of 32 ports; the sandbox allows only those. Ports the app opens are moved into the block, so its own parts still connect | Only its own block, which excludes the ports it opens itself; turn on Ports on this Mac when needed |
 | **Clipboard** | Three modes. Default *Write, read on paste*: contents are readable only within 1.5 s of ⌘V or Paste | Off by default, drag and drop included |
-| **Processes** | Every other process is *no such process*; the process table lists only the app | Process info and the process table are blocked |
+| **Processes** | Every other process is *no such process*; the process table, the running-app list and the window list contain only the app, and the frontmost app is reported as none | Process info and the process table are blocked; the running-app and window lists stay visible |
 | **Keychain** | One per app, inside its Kekkai folder, with a random password unlocked at launch. Your keychain can't be read or listed, and there is no option to open it. Apps that run in place get no keychain access | Same |
-| **Also** | No launching other apps or sending Apple events; per-app time zone; virtual location (CoreLocation, with GCJ-02 handled) | Same; virtual location switches to an injectable clone |
+| **Also** | No login items, background items, privileged helpers or admin prompts, all of which macOS would start outside Kekkai; no Spotlight queries, so installed apps can't be listed that way; no launching other apps or sending Apple events; per-app time zone; virtual location (CoreLocation, with GCJ-02 handled) | Same; virtual location switches to an injectable clone |
 
 macOS itself redacts the Wi-Fi name and BSSID for apps without location permission.
 
@@ -133,10 +133,12 @@ Per-app exceptions live in `rules/<bundle id>.json` and are kept to a minimum. T
 ## Limits
 
 - Not stealth: an app can tell it's sandboxed, and the user ID is real.
-- Non-injectable apps run without a copy can still read the display serial and UUID; they come from the window server, which the sandbox doesn't govern. The list of running apps comes from LaunchServices; blocking it stops GUI apps from launching.
+- An app that can't be injected and whose copy fails to run still sees the running-app and window lists, the display serial and UUID, and the computer name. They come from services every GUI app needs (LaunchServices, the window server, configd), so the sandbox can't block them. A computer name without your own name removes the last of these.
 - Internet traffic isn't restricted. LAN devices are covered by macOS's Local Network permission; IP-based location needs a proxy.
 - The Block Log sees only denials the system logs, and the log keeps only some repeats.
-- System extensions (such as a cloud drive's sync extension) are out of scope. Gatekeeper and App Store receipt checks are not bypassed.
+- Components macOS starts on its own, such as a cloud drive's sync extension or a helper installed before the app was added, run outside Kekkai. The app's settings list any it finds, running or installed.
+- Apps that must run in place (such as Tencent Meeting's direct download) use your real home folder, so its path, including your account name, is visible to them.
+- Gatekeeper and App Store receipt checks are not bypassed.
 - Not built to stop software designed to escape. Apple has deprecated `sandbox-exec`; retest after macOS updates.
 
 ## License

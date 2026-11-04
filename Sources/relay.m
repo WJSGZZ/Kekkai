@@ -46,9 +46,11 @@ static pid_t ownerAtPointer(void) {
     return 0;
 }
 
+// 软件本身，或它拉起的、在它结界文件夹里的程序（如 QQ 7.0.3 的 versions/<版本>/QQUpdate.app）
+static NSString *spacePath;
 static BOOL inApp(pid_t pid) {
     NSString *p = pathOf(pid);
-    return p && [p hasPrefix:[appPath stringByAppendingString:@"/"]];
+    return p && ([p hasPrefix:[appPath stringByAppendingString:@"/"]] || (spacePath && [p hasPrefix:spacePath]));
 }
 
 // 结界中各软件的主程序（run 时记在 <id>.binary）
@@ -196,6 +198,8 @@ int main(int argc, char **argv) {
     @autoreleasepool {
         if (argc < 5) return 2;
         appPath = @(argv[2]);
+        const char *sp = getenv("KEKKAI_SPACE");
+        if (sp && *sp) spacePath = [@(sp) stringByAppendingString:@"/"];
         appName = [NSFileManager.defaultManager displayNameAtPath:appPath].stringByDeletingPathExtension;
         NSMutableArray *n = [NSMutableArray array];
         for (int i = 5; i < argc; i++) [n addObject:@(argv[i]).stringByResolvingSymlinksInPath];

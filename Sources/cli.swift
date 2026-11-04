@@ -882,7 +882,8 @@ func startRelay(_ id: String, _ app: String, _ sock: String, _ inbox: String) {
     let n = label(id) + ".relay", job = "\(STATE)/\(n).plist"
     writePlist(["Label": n, "ProgramArguments": [ROOT + "/kekkai-relay", sock, app, STATE, inbox] + neverList(),
                 "RunAtLoad": true, "KeepAlive": false, "ProcessType": "Interactive", "LimitLoadToSessionType": "Aqua",
-                "StandardErrorPath": "/dev/null", "StandardOutPath": "/dev/null"] as Dict, job)
+                "StandardErrorPath": "/dev/null", "StandardOutPath": "/dev/null",
+                "EnvironmentVariables": ["KEKKAI_SPACE": spaceOf(id)]] as Dict, job)
     reload(n, job)
 }
 
@@ -943,6 +944,13 @@ func localCopy(_ app: String, _ id: String) -> String {
     remove(dst)
     mkdirs(parent(dst))
     if sh(["/bin/cp", "-cR", app, dst]).code != 0 { die(t("无法复制 \(name(app))", "Couldn't copy \(name(app))")) }
+    resignDeep(dst)
+    writeText(stamp, srcId)
+    return dst
+}
+
+/// 连同里面的小程序一起去掉苹果沙盒和强化运行时重签
+func resignDeep(_ dst: String) {
     let files = walk(dst + "/Contents").filter { !isSymlink($0) }
     let bundles = files.filter { ["app", "appex", "xpc"].contains(($0 as NSString).pathExtension) && isDir($0) }
     let loose = files.filter { isFile($0) && access($0, X_OK) == 0 && name(parent($0)) != "MacOS" && entitlements($0).keys.contains(where: stripped) }  // 如微信的 crashpad_handler
@@ -950,8 +958,37 @@ func localCopy(_ app: String, _ id: String) -> String {
         resign(b)
     }
     resign(dst)
-    writeText(stamp, srcId)
-    return dst
+}
+
+/// 软件自己下载到结界文件夹里的程序（实测 QQ 7.0.3 起真正的 QQ 是 versions/<版本>/QQUpdate.app，由 QQ.app 拉起）。
+/// 它们带原厂的强化签名，注入库进不去，伪装不生效：和副本一样重签。记下它们的程序名，拦截记录也算上
+func prepareParts(_ id: String) {
+    let space = spaceOf(id)
+    let found = sh(["/usr/bin/find", space + "/Library", "-maxdepth", "7", "-type", "d", "-name", "*.app", "-prune"]).out
+        .split(separator: "\n").map(String.init).filter { !$0.contains("/Caches/") }
+    var exes: [String] = []
+    for b in found {
+        guard let (_, exe) = info(b) else { continue }
+        exes.append(exe)
+        let stamp = parent(b) + "/." + name(b) + ".kekkai"
+        let srcId = mtime(b + "/Contents/Info.plist")
+        if readText(stamp) == srcId || injectable(b) { continue }
+        resignDeep(b)
+        writeText(stamp, srcId)
+    }
+    writeText("\(STATE)/\(id).parts", exes.joined(separator: "\n"))
+}
+
+/// App Store 版的程序按容器的位置找数据（~/Library/Containers/<id>/Data/Library/Application Support）；
+/// 副本不在容器里，数据在结界文件夹的 Library/Application Support。补一条同名路径指过去，两边看到同一份（实测 QQ 7.0.3 的 QQUpdate.app）
+func linkContainerData(_ id: String) {
+    let space = spaceOf(id)
+    let lib = "\(space)/Library/Containers/\(id)/Data/Library"
+    let link = lib + "/Application Support"
+    if exists(link) || isSymlink(link) { return }
+    mkdirs(lib)
+    mkdirs(space + "/Library/Application Support")
+    try? FM.createSymbolicLink(atPath: link, withDestinationPath: "../../../../Application Support")
 }
 
 // MARK: - 拦截记录
@@ -1063,7 +1100,10 @@ func denials(_ app: String, _ start: String) -> [Denial] {
     // 按 MacOS 文件夹里的文件认进程：有的辅助程序 Info.plist 不写 CFBundleExecutable（实测微信开发者工具的 Helper）
     var dirs = [app + "/Contents/MacOS"]
     dirs += walk(app + "/Contents").filter { $0.hasSuffix("/Contents/MacOS") && isDir($0) && !isSymlink($0) }
-    let exes = Set(dirs.filter(isDir).flatMap(listDir))
+    var exes = Set(dirs.filter(isDir).flatMap(listDir))
+    if let id = info(app)?.id, let parts = readText("\(STATE)/\(id).parts") {  // 结界文件夹里它自己下载的程序
+        exes.formUnion(parts.split(separator: "\n").map(String.init))
+    }
     var out: [Denial] = []
     let lines = logShow(start, "senderImagePath CONTAINS \"Sandbox\" AND eventMessage CONTAINS \" deny(\"").split(separator: "\n").map(String.init)
     for line in lines {
@@ -1326,6 +1366,10 @@ func run(_ appArg: String, learn: Bool = false) -> String? {
     let mode = sandboxed ? "space" : effectiveMode(id, c, rule)
     let ports = learn || opt(rule, c, "allow_localhost") ? (0, 0) : portBlock(id)
     let canInject = !learn && injectable(app)
+    if mode == "space" {
+        if sandboxed { linkContainerData(id) }
+        if canInject { prepareParts(id) }
+    }
     c["ports"] = [ports.0, ports.1]
     c["inject"] = canInject
     mkdirs(STATE)
@@ -1461,6 +1505,9 @@ func stop(_ app: String) {
     if jobState(id).running { writeText("\(STATE)/\(id).stopped", now()) }  // 是结界或你停的，不算它自己退出
     launchctl("bootout", "gui/\(UID)/\(label(id))")
     launchctl("bootout", "gui/\(UID)/\(label(id)).relay")
+    // 它拉起的附带程序在自己的进程组里，任务结束时不跟着退出（见 inject.c 的 spawn_part），按位置找出来结束
+    let space = spaceOf(id) + "/"
+    for (pid, p) in processTable() where p.path.hasPrefix(space) { kill(pid, SIGTERM) }
 }
 
 let TUNABLE = ["allow_localhost", "allow_procinfo", "allow_open"]
@@ -1692,10 +1739,12 @@ func listApps() {
             if entry["inj"] == nil { entry["inj"] = truthy(entry["sandboxed"]) || injectable(app) }  // 自带苹果沙盒的软件跑的是重签的副本，副本能注入
             if entry["q"] == nil { entry["q"] = quarantined(app) }
             cache[key] = entry
-            let inside = jobLines.contains { $0.components(separatedBy: "\t").last == label(id) && !$0.hasPrefix("-") }
             let c = data[id] as? Dict ?? [:]
             let rule = loadRule(id)
             let space = spaceOf(id)
+            // 任务在运行，或它拉起的附带程序（在结界文件夹里）还在运行
+            let inside = jobLines.contains { $0.components(separatedBy: "\t").last == label(id) && !$0.hasPrefix("-") }
+                || paths.contains { $0.hasPrefix(space + "/") }
             let inj = truthy(entry["inj"]) || (opt(rule, c, "clone") && !truthy(entry["q"]))  // 带隔离标记的不用副本
             let mode = effectiveMode(id, c, rule)
             let language: Any = inj && mode == "space" && !opt(rule, c, "keep_identity") ? commonLanguage?.lang ?? NSNull() : NSNull()

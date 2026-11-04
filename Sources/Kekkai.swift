@@ -218,13 +218,20 @@ final class Store: ObservableObject {
 
     /// 双击：没在运行就从结界打开，已在运行就切到它
     func launch(_ app: AppEntry) {
-        if app.inside, let running = NSRunningApplication.runningApplications(withBundleIdentifier: app.id).first(where: { !$0.isTerminated }) {
+        if app.inside, let running = runningInside(app) {
             bringForward(running)
         } else if app.running {
             message = t("\(displayName(app)) 正在结界外运行，请先退出后再打开。", "\(displayName(app)) is running outside Kekkai. Quit it completely first.")
         } else {
             open(path: app.path)
         }
+    }
+
+    /// 结界中运行的这个 App：它本身，或它拉起的、在它结界文件夹里的程序（如 QQ 7.0.3 真正的界面是 versions 里的 QQUpdate.app）
+    private func runningInside(_ app: AppEntry) -> NSRunningApplication? {
+        let all = NSWorkspace.shared.runningApplications.filter { !$0.isTerminated }
+        if let part = all.first(where: { $0.activationPolicy == .regular && ($0.bundleURL?.path.hasPrefix(app.space + "/") ?? false) }) { return part }
+        return all.first { $0.bundleIdentifier == app.id }
     }
 
     /// 切到结界中运行的 App。只 activate 时，窗口已关、只剩菜单栏图标的软件（如 QQ）不会出现，

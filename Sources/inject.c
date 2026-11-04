@@ -376,8 +376,14 @@ static id spawn_part(const char *exe, CFArrayRef args) {
         if (CFGetTypeID(a) == CFStringGetTypeID()) CFStringGetCString(a, b, sizeof b, kCFStringEncodingUTF8);
         argv[i + 1] = strdup(b);
     }
+    // 自己一个进程组：系统拉起的程序本就独立，主程序退出时不跟着被结束（实测 QQ 7.0.3 的外壳拉起 QQUpdate.app 后自己退出）
+    posix_spawnattr_t at;
+    posix_spawnattr_init(&at);
+    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETPGROUP);
+    posix_spawnattr_setpgroup(&at, 0);
     pid_t pid = 0;
-    int r = my_posix_spawn(&pid, exe, NULL, NULL, argv, environ);
+    int r = my_posix_spawn(&pid, exe, NULL, &at, argv, environ);
+    posix_spawnattr_destroy(&at);
     for (CFIndex i = 0; i <= n; i++) free(argv[i]);
     free(argv);
     if (r) return NULL;

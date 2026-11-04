@@ -11,6 +11,7 @@ unset KEKKAI_SIGN  # 分发包临时签名，不带开发者账号
 app="$("$src/scripts/build.sh" | tail -1)"
 work="$src/build/dmg-work"; rm -rf "$work"; mkdir -p "$work/stage/.background"
 ditto "$app" "$work/stage/Kekkai.app"
+rm -rf "$app"  # 留在构建目录会被聚焦收录，搜“结界”出现两个
 ln -s /Applications "$work/stage/Applications"
 swift "$src/Assets/make-dmg-background.swift" "$work"
 tiffutil -cathidpicheck "$work/dmg-background.png" "$work/dmg-background@2x.png" -out "$work/stage/.background/background.tiff"

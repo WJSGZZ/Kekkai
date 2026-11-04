@@ -862,14 +862,28 @@ func label(_ id: String) -> String { "io.github.wjsgzz.kekkai.\(id)" }
 
 func launchctl(_ args: String...) -> Output { sh(["/bin/launchctl"] + args) }
 
+/// 换下同名的任务再装上。bootout 返回时旧进程可能还在退出，这时 bootstrap 报 5（实测 QQ 自行更新退出后马上再打开），
+/// 所以等旧任务从 launchd 里消失，仍报错就稍后再试
+@discardableResult
+func reload(_ name: String, _ job: String) -> Output {
+    launchctl("bootout", "gui/\(UID)/\(name)")
+    var waited = 0
+    while waited < 50 && launchctl("print", "gui/\(UID)/\(name)").code == 0 { sleepSeconds(0.1); waited += 1 }
+    var r = launchctl("bootstrap", "gui/\(UID)", job), tries = 0
+    while r.code != 0 && tries < 5 {
+        sleepSeconds(0.5); tries += 1
+        r = launchctl("bootstrap", "gui/\(UID)", job)
+    }
+    return r
+}
+
 /// 替这个软件接住拖进来、粘贴进来的文件的中转程序：在结界外运行，复制一份进传输文件夹，软件退出后自行结束
 func startRelay(_ id: String, _ app: String, _ sock: String, _ inbox: String) {
     let n = label(id) + ".relay", job = "\(STATE)/\(n).plist"
     writePlist(["Label": n, "ProgramArguments": [ROOT + "/kekkai-relay", sock, app, STATE, inbox] + neverList(),
                 "RunAtLoad": true, "KeepAlive": false, "ProcessType": "Interactive", "LimitLoadToSessionType": "Aqua",
                 "StandardErrorPath": "/dev/null", "StandardOutPath": "/dev/null"] as Dict, job)
-    launchctl("bootout", "gui/\(UID)/\(n)")
-    launchctl("bootstrap", "gui/\(UID)", job)
+    reload(n, job)
 }
 
 let LEARN_PROFILE = "(version 1)\n(allow default)\n(allow file-read* file-write* (with report))\n"
@@ -1420,8 +1434,7 @@ func run(_ appArg: String, learn: Bool = false) -> String? {
     writePlist(["Label": label(id), "ProgramArguments": args, "RunAtLoad": true, "KeepAlive": false,
                 "WorkingDirectory": cwd, "ProcessType": "Interactive", "LimitLoadToSessionType": "Aqua",
                 "StandardErrorPath": "\(STATE)/\(id).log", "StandardOutPath": "/dev/null", "EnvironmentVariables": env] as Dict, job)
-    launchctl("bootout", "gui/\(UID)/\(label(id))")
-    let r = launchctl("bootstrap", "gui/\(UID)", job)
+    let r = reload(label(id), job)
     let err = r.err.trimmingCharacters(in: .whitespacesAndNewlines)
     return r.code == 0 ? nil : t("启动失败：\(err)", "Launch failed: \(err)")
 }

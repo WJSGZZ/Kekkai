@@ -1434,19 +1434,21 @@ func run(_ appArg: String, learn: Bool = false) -> String? {
         if clipboardMode(c, true) == "paste" { env["KEKKAI_PASTE"] = "1" }
         if !opt(rule, c, "allow_procinfo") { env["KEKKAI_PROCS"] = "1" }
         if !opt(rule, c, "allow_lan") { env["KEKKAI_NOLAN"] = "1" }
-        if clipboardMode(c, true) != "off" && exists(ROOT + "/kekkai-relay") {
+        // 中转程序：拖入和粘贴文件（剪贴板不是“禁止”时），以及打开用户点按的链接
+        if exists(ROOT + "/kekkai-relay") {
             let sock = (env["TMPDIR"] ?? spaceOf(id) + "/tmp/") + ".kekkai-relay"
             if sock.utf8.count < 104 {  // 套接字路径的长度上限
                 mkdirs(parent(sock))
                 startRelay(id, app, sock, inboxOf(id, mode))
-                env["KEKKAI_RELAY"] = sock
+                if clipboardMode(c, true) != "off" { env["KEKKAI_RELAY"] = sock }
+                env["KEKKAI_LINKS"] = sock
             }
         }
         // 只在偏好设置不经系统服务时改，否则会写进真实的偏好设置
         if env["__CFPREFERENCES_AVOID_DAEMON"] != nil && !opt(rule, c, "keep_identity"), let lang = commonLanguage {
             env["KEKKAI_LANG"] = lang.lang; env["KEKKAI_LOCALE"] = lang.locale
         }
-        if ["KEKKAI_HOME", "KEKKAI_SEED", "KEKKAI_PORTS", "KEKKAI_PASTE", "KEKKAI_PROCS", "KEKKAI_NOLAN", "KEKKAI_LANG", "KEKKAI_RELAY"].contains(where: { env[$0] != nil }) {
+        if ["KEKKAI_HOME", "KEKKAI_SEED", "KEKKAI_PORTS", "KEKKAI_PASTE", "KEKKAI_PROCS", "KEKKAI_NOLAN", "KEKKAI_LANG", "KEKKAI_RELAY", "KEKKAI_LINKS"].contains(where: { env[$0] != nil }) {
             libs.append("libkekkai.dylib")
             if exists(ROOT + "/badge.png") { env["KEKKAI_BADGE"] = LIBDIR + "/badge.png" }  // 程序坞图标加结界角标
         }

@@ -162,6 +162,33 @@ static BOOL confirmPaste(NSArray<NSArray<NSString *> *> *files) {
     return (r & 3) == kCFUserNotificationDefaultResponse;
 }
 
+// 打开链接：只开网址、邮件和 App Store 链接，且需这个软件在最前面、用户 10 秒内点按过，每次点按只开一次
+static double lastOpenAge = -1;  // 上次放行时距上次点按的秒数，配合 lastOpen 判断之后有没有新的点按
+static CFAbsoluteTime lastOpen;
+static double sinceInput(void) {
+    double m = CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateHIDSystemState, kCGEventLeftMouseUp);
+    double k = CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateHIDSystemState, kCGEventKeyDown);
+    return MIN(m, k);
+}
+static BOOL openLink(int fd) {
+    NSMutableData *d = [NSMutableData data];
+    char b[4096];
+    ssize_t n;
+    while ((n = read(fd, b, sizeof b)) > 0 && d.length < 16384) [d appendBytes:b length:n];
+    NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    NSURL *url = s ? [NSURL URLWithString:s] : nil;
+    NSArray *ok = @[@"http", @"https", @"mailto", @"macappstore", @"macappstores", @"itms-apps", @"itms-appss"];
+    if (!url || ![ok containsObject:url.scheme.lowercaseString]) return NO;
+    double age = sinceInput();
+    if (age > 10) return NO;
+    // 上次放行之后没有新的点按：同一次点按不再开第二个
+    if (lastOpenAge >= 0 && age >= lastOpenAge + (CFAbsoluteTimeGetCurrent() - lastOpen) - 0.05) return NO;
+    if (!inApp(NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier)) return NO;
+    lastOpenAge = age;
+    lastOpen = CFAbsoluteTimeGetCurrent();
+    return [NSWorkspace.sharedWorkspace openURL:url];
+}
+
 static void answer(int fd) {
     char kind = 0;
     if (read(fd, &kind, 1) != 1) return;
@@ -170,7 +197,8 @@ static void answer(int fd) {
     getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &peer, &len);
     if (!inApp(peer)) return;
     NSString *out = @"";
-    if (kind == 'D') {
+    if (kind == 'U') out = openLink(fd) ? @"1" : @"";
+    else if (kind == 'D') {
         NSPasteboard *pb = [NSPasteboard pasteboardWithName:NSPasteboardNameDrag];
         if (pb.changeCount != okCount || !inApp(ownerAtPointer())) return;
         out = relay(filesOn(pb), pb.changeCount, @"");

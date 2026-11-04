@@ -42,6 +42,7 @@
 #include <dns_sd.h>
 #include <Network/Network.h>
 #include <Security/Security.h>
+#include <CoreServices/CoreServices.h>
 
 #define INTERPOSE(mine, theirs) \
     __attribute__((used)) static struct { const void *a, *b; } _i_##theirs \
@@ -50,7 +51,7 @@
 static const char *carry[] = {"HOME", "DYLD_INSERT_LIBRARIES", "KEKKAI_HOME", "KEKKAI_LAT", "KEKKAI_LON",
                               "KEKKAI_SERIAL", "KEKKAI_UUID", "KEKKAI_NAME", "KEKKAI_SEED",
                               "KEKKAI_PORTS", "KEKKAI_PORTMAP", "KEKKAI_PASTE", "KEKKAI_PROCS",
-                              "KEKKAI_NOLAN", "KEKKAI_LANG", "KEKKAI_LOCALE", "KEKKAI_RELAY", "KEKKAI_BADGE", NULL};
+                              "KEKKAI_NOLAN", "KEKKAI_LANG", "KEKKAI_LOCALE", "KEKKAI_RELAY", "KEKKAI_BADGE", "KEKKAI_LINKS", NULL};
 static char *saved[sizeof carry / sizeof *carry];  // 启动时记下的 "名字=值"
 static char *home, *serial, *uuid, *name, *seed, *portmap;
 static int pstart, pcount;  // 分给它的端口：pstart 起 pcount 个
@@ -418,6 +419,56 @@ static void g_open_app(id self, SEL sel, id url, id config, id done) {
     if (done) ((void (*)(void *, id, id))((struct block *)done)->invoke)(done, app, NULL);
 }
 
+// ---- 打开链接 ----
+// 沙盒禁止 lsopen，软件里点链接、“检查更新”去 App Store 都打不开（微信 App Store 版实测 deny lsopen）。
+// 网址、邮件和 App Store 链接交给结界外的中转程序打开；那边自己核对是用户刚点按过、这个软件在最前面，
+// 每次点按只开一次。其他种类（文件、自定义协议）照旧交给系统，仍被沙盒拦下。
+static char *links_sock;
+static int link_ok(CFURLRef url) {
+    if (!links_sock || !url) return 0;
+    CFStringRef sc = CFURLCopyScheme(url);
+    if (!sc) return 0;
+    const CFStringRef ok[] = {CFSTR("http"), CFSTR("https"), CFSTR("mailto"), CFSTR("macappstore"), CFSTR("macappstores"),
+                              CFSTR("itms-apps"), CFSTR("itms-appss")};
+    int r = 0;
+    for (size_t i = 0; i < sizeof ok / sizeof *ok && !r; i++) r = CFStringCompare(sc, ok[i], kCFCompareCaseInsensitive) == kCFCompareEqualTo;
+    CFRelease(sc);
+    return r;
+}
+static int open_link(CFURLRef url) {
+    CFStringRef s = CFURLGetString(url);
+    char u[8192];
+    if (!s || !CFStringGetCString(s, u, sizeof u, kCFStringEncodingUTF8)) return 0;
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un a = {.sun_family = AF_UNIX};
+    strlcpy(a.sun_path, links_sock, sizeof a.sun_path);
+    char kind = 'U', ans = 0;
+    int ok = fd >= 0 && !connect(fd, (struct sockaddr *)&a, sizeof a) && write(fd, &kind, 1) == 1 &&
+             write(fd, u, strlen(u)) == (ssize_t)strlen(u) && !shutdown(fd, SHUT_WR) && read(fd, &ans, 1) == 1 && ans == '1';
+    if (fd >= 0) close(fd);
+    return ok;
+}
+static IMP orig_open_url, orig_open_url_cfg;
+static BOOL g_open_url(id self, SEL sel, id url) {
+    if (link_ok((CFURLRef)url) && open_link((CFURLRef)url)) return YES;
+    return ((BOOL (*)(id, SEL, id))orig_open_url)(self, sel, url);
+}
+static void g_open_url_cfg(id self, SEL sel, id url, id config, id done) {
+    if (link_ok((CFURLRef)url) && open_link((CFURLRef)url)) {
+        if (done) ((void (*)(void *, id, id))((struct block *)done)->invoke)(done, NULL, NULL);
+        return;
+    }
+    ((void (*)(id, SEL, id, id, id))orig_open_url_cfg)(self, sel, url, config, done);
+}
+static OSStatus my_LSOpenCFURLRef(CFURLRef url, CFURLRef *launched) {
+    if (link_ok(url) && open_link(url)) {
+        if (launched) *launched = NULL;
+        return noErr;
+    }
+    return LSOpenCFURLRef(url, launched);
+}
+INTERPOSE(my_LSOpenCFURLRef, LSOpenCFURLRef)
+
 static void find_proxies(void);
 static void set_language(const char *lang, const char *locale);
 
@@ -443,6 +494,11 @@ __attribute__((constructor)) static void setup(void) {
         relay_to = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
     }
     if (paste_gate || relay_sock) guard_clipboard();
+    if ((v = getenv("KEKKAI_LINKS"))) {
+        links_sock = strdup(v);
+        hook("NSWorkspace", "openURL:", (IMP)g_open_url, &orig_open_url);
+        hook("NSWorkspace", "openURL:configuration:completionHandler:", (IMP)g_open_url_cfg, &orig_open_url_cfg);
+    }
     hide_procs = getenv("KEKKAI_PROCS") != NULL;
     if (hide_procs) hide_apps();
     if ((no_lan = getenv("KEKKAI_NOLAN") != NULL)) find_proxies();

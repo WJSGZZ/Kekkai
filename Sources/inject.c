@@ -295,35 +295,53 @@ static void guard_clipboard(void) {
 
 static void hide_apps(void);
 
-// 程序坞图标：启动完成后把它的图标换成右下角叠了结界图标的一份，和入口 App 的图标一致（入口那份见 Kekkai.swift 的 launcherIcon）。
-// 只改显示在程序坞里的进程；两张图都按系统图标网格留了约 9.8% 的边，角标对齐原图标右下角并略微探出
+// 程序坞图标：叠上结界图标，和入口 App 的图标一致（入口那份见 Kekkai.swift 的 launcherIcon）。
+// 两张图都按系统图标网格留了约 9.8% 的边，角标对齐原图标右下角并略微探出。
+// 启动完成时换一次；软件之后自己设图标（实测腾讯会议 VooV 会）也经 setApplicationIconImage:，同样叠上
 static char *badge_path;
+static id badge_img, last_badged;  // last_badged：上次叠好的那张，软件把它原样设回来时不再叠
 static id msg(id o, const char *s) { return ((id (*)(id, SEL))objc_msgSend)(o, sel_registerName(s)); }
-static void badge_dock(void) {
-    Class A = objc_getClass("NSApplication"), I = objc_getClass("NSImage");
-    if (!A || !I) return;
-    id app = msg((id)A, "sharedApplication");
-    if (((long (*)(id, SEL))objc_msgSend)(app, sel_registerName("activationPolicy")) != 0) return;  // 0：普通 App
-    id base = msg(app, "applicationIconImage");
-    CFStringRef p = CFStringCreateWithCString(NULL, badge_path, kCFStringEncodingUTF8);
-    id badge = ((id (*)(id, SEL, id))objc_msgSend)(msg((id)I, "alloc"), sel_registerName("initWithContentsOfFile:"), (id)p);
-    CFRelease(p);
-    if (!base || !badge) return;
+static id badged(id base) {
+    Class I = objc_getClass("NSImage");
+    if (!I || !base) return NULL;
+    if (!badge_img) {
+        CFStringRef p = CFStringCreateWithCString(NULL, badge_path, kCFStringEncodingUTF8);
+        badge_img = ((id (*)(id, SEL, id))objc_msgSend)(msg((id)I, "alloc"), sel_registerName("initWithContentsOfFile:"), (id)p);
+        CFRelease(p);
+        if (!badge_img) return NULL;
+    }
     id img = ((id (*)(id, SEL, CGSize))objc_msgSend)(msg((id)I, "alloc"), sel_registerName("initWithSize:"), CGSizeMake(1024, 1024));
     SEL draw = sel_registerName("drawInRect:");
     double s = 470, margin = s * 0.098, out = 24;
     msg(img, "lockFocus");
     ((void (*)(id, SEL, CGRect))objc_msgSend)(base, draw, CGRectMake(0, 0, 1024, 1024));
-    ((void (*)(id, SEL, CGRect))objc_msgSend)(badge, draw, CGRectMake(1024 - 100 + out + margin - s, 100 - out - margin, s, s));
+    ((void (*)(id, SEL, CGRect))objc_msgSend)(badge_img, draw, CGRectMake(1024 - 100 + out + margin - s, 100 - out - margin, s, s));
     msg(img, "unlockFocus");
-    ((void (*)(id, SEL, id))objc_msgSend)(app, sel_registerName("setApplicationIconImage:"), img);
-    msg(img, "release");
-    msg(badge, "release");
+    return img;
+}
+static IMP orig_seticon;
+static void set_badged(id app, SEL sel, id base) {
+    id img = badged(base);
+    ((void (*)(id, SEL, id))orig_seticon)(app, sel, img ? img : base);
+    if (!img) return;
+    if (last_badged) msg(last_badged, "release");
+    last_badged = img;
+}
+static void g_seticon(id self, SEL sel, id img) {
+    if (img && img == last_badged) { ((void (*)(id, SEL, id))orig_seticon)(self, sel, img); return; }
+    if (!img) {  // 设成 nil 是改回包里的图标，取回来再叠
+        ((void (*)(id, SEL, id))orig_seticon)(self, sel, img);
+        img = msg(self, "applicationIconImage");
+    }
+    set_badged(self, sel, img);
 }
 static IMP orig_finish;
 static void g_finish(id self, SEL sel) {
     ((void (*)(id, SEL))orig_finish)(self, sel);
-    badge_dock();
+    // 0：普通 App，只换程序坞里的。启动完成前软件自己设过图标的，已经叠好了
+    if (((long (*)(id, SEL))objc_msgSend)(self, sel_registerName("activationPolicy")) != 0) return;
+    if (!orig_seticon || last_badged) return;
+    set_badged(self, sel_registerName("setApplicationIconImage:"), msg(self, "applicationIconImage"));
 }
 
 static void find_proxies(void);
@@ -358,6 +376,7 @@ __attribute__((constructor)) static void setup(void) {
     if ((v = getenv("KEKKAI_BADGE"))) {
         badge_path = strdup(v);
         hook("NSApplication", "finishLaunching", (IMP)g_finish, &orig_finish);
+        hook("NSApplication", "setApplicationIconImage:", (IMP)g_seticon, &orig_seticon);
     }
     const char *h = getenv("KEKKAI_HOME");
     if (!h) return;

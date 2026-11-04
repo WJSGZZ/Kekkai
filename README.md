@@ -96,6 +96,7 @@ flowchart LR
 
 - The clone can't enter the original container (`~/Library/Containers/<id>`), because System Policy admits only the original signature. Its container data is cloned in when the copy is made, and *Import from Original…* in the Files pane refreshes it any time. macOS protects other apps' containers, so importing needs Full Disk Access for Kekkai; without it the import stops and offers to open the setting.
 - Sign-in tokens are held per signature, so expect to sign in again and to re-grant camera and microphone access.
+- The WeChat clone asks for confirmation on your phone at every sign-in and never offers automatic sign-in. Runs with the real device identity, without injection and without the sandbox all behaved the same, while the original signs in directly. What remains is the clone's ad-hoc signature and its separate data location; Kekkai does not forge signatures, so this stays for now.
 - When the original app updates, the clone is rebuilt on next launch. The two don't share data.
 - The clone loses the App Sandbox's deny-by-default floor and relies on Kekkai's rules instead.
 

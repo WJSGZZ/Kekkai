@@ -51,6 +51,7 @@
 - **语言与时区**：`commonLanguage` 取系统首选语言的第一项，换成该语言最常见的地区（`COMMON_REGION`），注入库在启动时 `CFPreferencesSetAppValue` 写 `AppleLanguages`／`AppleLocale`，软件域里已有 `AppleLanguages` 的不动。只在设了 `__CFPREFERENCES_AVOID_DAEMON` 时传：实测该变量下偏好设置的写入在沙盒内不落盘；不设时同样的调用会经 cfprefsd 写进真实的 `~/Library/Preferences/<id>.plist`。时区：设置里没选时，`appZone()` 换成该地区里今后两年钟点完全相同的时区（`sameClock()`），设了 `keep_identity` 的不换。设置里 `tz` 为 `location` 时按虚拟位置查时区：`zoneAt()` 读 CoreLocation 自带的 `timezone.db`（SQLite，R 树外框加多边形），点在多边形内即取该时区，海上按经度取 `Etc/GMT±N`；实测乌鲁木齐、拉萨得 Asia/Shanghai，香港得 Asia/Hong_Kong。没设虚拟位置时按自动处理。
 - **偏好设置的实际去向（实测，待真实软件核对）**：`__CFPREFERENCES_AVOID_DAEMON` 下 CoreFoundation 按用户数据库里的家目录找偏好文件，不看 `CFFIXED_USER_HOME`；沙盒内查用户数据库被挡，测试程序写的值不落盘，结界文件夹的 `Library/Preferences` 也没有新文件。真实软件是否每次启动都丢失自己的偏好设置尚未核对。
 - **进程**：“其他进程信息”关闭时，沙盒另挡 `kern.proc.all` 等 sysctl（只挡 process-info 实测能被它绕过）；能注入的由注入库把别人答成 ESRCH、列表只给自己，不能注入的连 `kern.proc.pid` 也挡。
+- **附带程序（2026-11-04）**：软件用 `NSWorkspace` 的 `launchApplicationAtURL:options:configuration:error:` 或 `openApplicationAtURL:configuration:completionHandler:` 拉起结界文件夹里的程序时，注入库改为直接作为子进程启动（`own_part()`／`spawn_part()`），仍在沙盒里、带注入库；主程序自己和结界外的程序照旧交给系统（系统那条会被 `deny lsopen` 拦下）。起因：QQ 热更新（`versions/<版本>/QQUpdate.app`，`config.json` 的 `curVersion` 决定用哪个版本）在新版本就绪时拉起 `QQHelper.app` 去掉新版本的隔离标记，原先每次被拦（日志 `LaunchServices.launchViaCSUA` 后 `deny(1) lsopen`）。测试程序验证两种调用都能在禁止 lsopen 的沙盒里启动附带程序，参数和环境变量带到；返回的 `NSRunningApplication` 为 nil（系统还没登记）。QQ 点“重启更新”后能否换到新版本、能否自行重启，未实测。注意 QQ 的日志时间按结界给它的时区写（虚拟位置在纽约时比北京时间晚 13 小时）。
 - 注入库要先写新文件再替换，原地覆盖已签名的库会让加载它的软件被系统以 `OS_REASON_CODESIGNING` 杀掉。
 - 拦截记录按各 `Contents/MacOS` 里的文件名认进程，不读 `CFBundleExecutable`（微信开发者工具的 Helper 不写这一项）。
 
@@ -80,7 +81,7 @@
 2. 一次只测一个软件，只用本机已装的。先完全退出它，再 `kekkai add /Applications/X.app` 或在界面里添加。
 3. 看三处：能否正常启动和登录；`kekkai blocked X.app` 的拦截记录；`log show --predicate 'sender == "Sandbox"'` 里有没有漏掉的拒绝。
 4. 结论写进 README 的实测表，写明 macOS 版本、哪种模式、有无注入。
-5. 发版前用正在用的真实软件（至少 QQ、微信各一个）走一遍：打开、退出后马上再打开、软件自行更新重启后再打开，以及拖入文件。测试程序和开发者工具通过不代表真实软件没问题（v0.1.1 发布后，QQ 自行更新退出、紧接着再打开时报 “Bootstrap failed: 5”：bootout 返回时旧进程还在退出，现由 `reload()` 等旧任务消失并重试）。
+5. 发版前用正在用的真实软件（至少 QQ、微信各一个）走一遍：打开、退出后马上再打开、软件自行更新重启后再打开，以及拖入文件。测试程序和开发者工具通过不代表真实软件没问题（v0.1.1 发布后，QQ 退出约一秒后再打开时报 “Bootstrap failed: 5”：bootout 返回时旧进程还在退出，现由 `reload()` 等旧任务消失并重试）。
 6. 试运行失败要先分清是沙盒挡的（日志有 deny）、签名问题（软件自检或 EPERM 来自 System Policy），还是软件自己的问题，再决定改规则、加 `rules/` 还是写进“做不到的”。
 
 ## 现状

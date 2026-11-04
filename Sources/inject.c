@@ -344,6 +344,67 @@ static void g_finish(id self, SEL sel) {
     set_badged(self, sel_registerName("setApplicationIconImage:"), msg(self, "applicationIconImage"));
 }
 
+// 软件用 NSWorkspace 拉起自己文件夹里附带的程序（实测 QQ 更新就绪时拉起 versions/<版本>/QQUpdate.app/…/QQHelper.app）：
+// 经 LaunchServices 启动的程序在结界外，沙盒按 lsopen 拦下，附带程序就不运行。
+// 结界文件夹里的程序改为直接作为子进程启动，仍在沙盒里、带着注入库；主程序自己和结界外的程序照旧交给系统
+static int my_posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *fa,
+                          const posix_spawnattr_t *attr, char *const argv[], char *const envp[]);
+extern char **environ;
+static int own_part(CFURLRef url, char *exe, size_t n) {
+    char p[PATH_MAX], m[PATH_MAX] = "";
+    if (!url || !home || !CFURLGetFileSystemRepresentation(url, true, (UInt8 *)p, sizeof p)) return 0;
+    size_t h = strlen(home);
+    if (strncmp(p, home, h) || p[h] != '/') return 0;
+    CFURLRef mu = CFBundleCopyBundleURL(CFBundleGetMainBundle());
+    if (mu) { CFURLGetFileSystemRepresentation(mu, true, (UInt8 *)m, sizeof m); CFRelease(mu); }
+    if (!strcmp(m, p)) return 0;
+    CFBundleRef b = CFBundleCreate(NULL, url);
+    if (!b) return 0;
+    CFURLRef e = CFBundleCopyExecutableURL(b);
+    CFRelease(b);
+    int ok = e && CFURLGetFileSystemRepresentation(e, true, (UInt8 *)exe, n);
+    if (e) CFRelease(e);
+    return ok;
+}
+static id spawn_part(const char *exe, CFArrayRef args) {
+    CFIndex n = args && CFGetTypeID(args) == CFArrayGetTypeID() ? CFArrayGetCount(args) : 0;
+    char **argv = calloc(n + 2, sizeof *argv);
+    argv[0] = strdup(exe);
+    for (CFIndex i = 0; i < n; i++) {
+        CFTypeRef a = CFArrayGetValueAtIndex(args, i);
+        char b[4096] = "";
+        if (CFGetTypeID(a) == CFStringGetTypeID()) CFStringGetCString(a, b, sizeof b, kCFStringEncodingUTF8);
+        argv[i + 1] = strdup(b);
+    }
+    pid_t pid = 0;
+    int r = my_posix_spawn(&pid, exe, NULL, NULL, argv, environ);
+    for (CFIndex i = 0; i <= n; i++) free(argv[i]);
+    free(argv);
+    if (r) return NULL;
+    Class R = objc_getClass("NSRunningApplication");
+    return R ? ((id (*)(id, SEL, pid_t))objc_msgSend)((id)R, sel_registerName("runningApplicationWithProcessIdentifier:"), pid) : NULL;
+}
+static IMP orig_launch_url, orig_open_app;
+static id g_launch_url(id self, SEL sel, id url, unsigned long opts, id config, id *err) {
+    char exe[PATH_MAX];
+    if (!own_part((CFURLRef)url, exe, sizeof exe))
+        return ((id (*)(id, SEL, id, unsigned long, id, id *))orig_launch_url)(self, sel, url, opts, config, err);
+    id *key = dlsym(RTLD_DEFAULT, "NSWorkspaceLaunchConfigurationArguments");
+    CFArrayRef args = config && key && *key ? CFDictionaryGetValue((CFDictionaryRef)config, (const void *)*key) : NULL;
+    if (err) *err = NULL;
+    return spawn_part(exe, args);
+}
+struct block { void *isa; int flags, reserved; void (*invoke)(void *, ...); };
+static void g_open_app(id self, SEL sel, id url, id config, id done) {
+    char exe[PATH_MAX];
+    if (!own_part((CFURLRef)url, exe, sizeof exe)) {
+        ((void (*)(id, SEL, id, id, id))orig_open_app)(self, sel, url, config, done);
+        return;
+    }
+    id app = spawn_part(exe, config ? (CFArrayRef)msg(config, "arguments") : NULL);
+    if (done) ((void (*)(void *, id, id))((struct block *)done)->invoke)(done, app, NULL);
+}
+
 static void find_proxies(void);
 static void set_language(const char *lang, const char *locale);
 
@@ -381,6 +442,8 @@ __attribute__((constructor)) static void setup(void) {
     const char *h = getenv("KEKKAI_HOME");
     if (!h) return;
     home = strdup(h);
+    hook("NSWorkspace", "launchApplicationAtURL:options:configuration:error:", (IMP)g_launch_url, &orig_launch_url);
+    hook("NSWorkspace", "openApplicationAtURL:configuration:completionHandler:", (IMP)g_open_app, &orig_open_app);
     fake = (struct passwd){.pw_name = "user", .pw_passwd = "*", .pw_uid = getuid(), .pw_gid = getgid(),
                            .pw_gecos = "User", .pw_dir = home, .pw_shell = "/bin/zsh", .pw_class = ""};
 }

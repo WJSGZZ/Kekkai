@@ -862,7 +862,7 @@ func label(_ id: String) -> String { "io.github.wjsgzz.kekkai.\(id)" }
 
 func launchctl(_ args: String...) -> Output { sh(["/bin/launchctl"] + args) }
 
-/// 换下同名的任务再装上。bootout 返回时旧进程可能还在退出，这时 bootstrap 报 5（实测 QQ 自行更新退出后马上再打开），
+/// 换下同名的任务再装上。bootout 返回时旧进程可能还在退出，这时 bootstrap 报 5（实测 QQ 退出约一秒后再打开），
 /// 所以等旧任务从 launchd 里消失，仍报错就稍后再试
 @discardableResult
 func reload(_ name: String, _ job: String) -> Output {

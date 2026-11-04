@@ -804,6 +804,9 @@ func buildProfile(_ app: String, _ id: String, _ rule: Dict, _ conf: Dict, _ mod
         // 系统安全替换文件时建的临时文件夹，以软件显示名命名
         let shown = (displayNames(app) + ownNames(id, rule)).map(reEscape).joined(separator: "|")
         L.append("(allow file-read* file-write* (regex #\"^\(reEscape(USER_TEMP))/TemporaryItems/NSIRD_(\(shown))_[^/]+(/.*)?$\"))")
+        // 偏好设置先写成这里的 <域>.plist.<随机> 再换名进结界文件夹，不放行就一项也存不下；
+        // 只许写不许读，目录也不可列出，别的软件同名临时文件的随机后缀猜不到
+        L.append("(allow file-write* (regex #\"^\(reEscape(USER_TEMP))/TemporaryItems/[^/]+\\.plist\\.[A-Za-z0-9]+$\"))")
     }
     L += ["(deny file-read-data (with errno 2)"] + NO_LIST.map { "  (literal \(q($0)))" } + [")"]
     var system = (rule["system_paths"] as? [String] ?? []).map { "(subpath \(q($0)))" }

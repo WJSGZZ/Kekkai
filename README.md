@@ -119,6 +119,7 @@ Tested on macOS 27.2.
 
 - Not stealth: an app can tell it's sandboxed, and the user ID is real.
 - An app that can't be injected, and whose copy won't run either, still sees the running-app and window lists, the display serial and UUID, and the computer name. They come from services every GUI app needs (LaunchServices, the window server, configd), so the sandbox can't block them. A computer name without your own name removes the last of these.
+- An app that can't be injected can't save its own preferences (window sizes, options kept in macOS defaults); they reset at each launch. Settings an app keeps in its own files are unaffected.
 - Internet traffic isn't restricted. LAN devices are covered by macOS's Local Network permission; hiding your IP-based location needs a proxy.
 - The Block Log sees only the denials macOS logs, and the log keeps only some repeats.
 - Components macOS starts on its own, such as a cloud drive's sync extension or a helper installed before the app was added, run outside Kekkai. The app's settings list any it finds, running or installed.

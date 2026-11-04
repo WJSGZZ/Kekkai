@@ -487,6 +487,12 @@ __attribute__((constructor)) static void setup(void) {
     if ((v = getenv("KEKKAI_SEED"))) seed = strdup(v);
     if ((v = getenv("KEKKAI_PORTS")) && sscanf(v, "%d:%d", &pstart, &pcount) != 2) pcount = 0;
     if ((v = getenv("KEKKAI_PORTMAP"))) portmap = strdup(v);
+    // 假用户要在任何偏好设置调用之前就位：CoreFoundation 第一次读偏好设置时按用户数据库定下家目录并缓存
+    if ((v = getenv("KEKKAI_HOME"))) {
+        home = strdup(v);
+        fake = (struct passwd){.pw_name = "user", .pw_passwd = "*", .pw_uid = getuid(), .pw_gid = getgid(),
+                               .pw_gecos = "User", .pw_dir = home, .pw_shell = "/bin/zsh", .pw_class = ""};
+    }
     paste_gate = getenv("KEKKAI_PASTE") != NULL;
     if ((v = getenv("KEKKAI_RELAY"))) {
         relay_sock = strdup(v);
@@ -508,13 +514,9 @@ __attribute__((constructor)) static void setup(void) {
         hook("NSApplication", "finishLaunching", (IMP)g_finish, &orig_finish);
         hook("NSApplication", "setApplicationIconImage:", (IMP)g_seticon, &orig_seticon);
     }
-    const char *h = getenv("KEKKAI_HOME");
-    if (!h) return;
-    home = strdup(h);
+    if (!home) return;
     hook("NSWorkspace", "launchApplicationAtURL:options:configuration:error:", (IMP)g_launch_url, &orig_launch_url);
     hook("NSWorkspace", "openApplicationAtURL:configuration:completionHandler:", (IMP)g_open_app, &orig_open_app);
-    fake = (struct passwd){.pw_name = "user", .pw_passwd = "*", .pw_uid = getuid(), .pw_gid = getgid(),
-                           .pw_gecos = "User", .pw_dir = home, .pw_shell = "/bin/zsh", .pw_class = ""};
 }
 
 static int mine(uid_t uid) { return home && uid == getuid(); }
@@ -795,17 +797,24 @@ INTERPOSE(my_DNSServiceRegister, DNSServiceRegister)
 
 // ---- 语言 ----
 
-// 只改本进程的偏好设置：结界文件夹里偏好设置不经系统服务，不会写进真实的偏好设置。软件自己选过语言的不动
+// 写进软件自己的偏好设置（在结界文件夹里，不经系统服务）。软件自己选过语言的不动；
+// 上次由结界写入的（KekkaiLanguage 记着写入的值）按当前系统语言更新
 static void set_language(const char *lang, const char *locale) {
-    CFPropertyListRef own = CFPreferencesCopyValue(CFSTR("AppleLanguages"), kCFPreferencesCurrentApplication,
-                                                   kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
-    if (own) return CFRelease(own);
+    CFStringRef app = kCFPreferencesCurrentApplication;
+    CFPropertyListRef own = CFPreferencesCopyValue(CFSTR("AppleLanguages"), app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    CFPropertyListRef mark = CFPreferencesCopyValue(CFSTR("KekkaiLanguage"), app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    int ours = own && mark && CFEqual(own, mark);
+    if (own) CFRelease(own);
+    if (mark) CFRelease(mark);
+    if (own && !ours) return;
     CFStringRef l = CFStringCreateWithCString(NULL, lang, kCFStringEncodingUTF8);
     CFStringRef r = CFStringCreateWithCString(NULL, locale, kCFStringEncodingUTF8);
     CFArrayRef a = CFArrayCreate(NULL, (const void **)&l, 1, &kCFTypeArrayCallBacks);
-    CFPreferencesSetAppValue(CFSTR("AppleLanguages"), a, kCFPreferencesCurrentApplication);
-    CFPreferencesSetAppValue(CFSTR("AppleLocale"), r, kCFPreferencesCurrentApplication);
-    CFRelease(a), CFRelease(l), CFRelease(r);
+    // 一次写入：结界里偏好设置不经系统服务，紧接着的第二次写入要约 10 秒后才落盘，软件先退出就丢了（实测）
+    const void *k[] = {CFSTR("AppleLanguages"), CFSTR("KekkaiLanguage"), CFSTR("AppleLocale")}, *v[] = {a, a, r};
+    CFDictionaryRef d = CFDictionaryCreate(NULL, k, v, 3, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFPreferencesSetMultiple(d, NULL, app, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+    CFRelease(d), CFRelease(a), CFRelease(l), CFRelease(r);
 }
 
 INTERPOSE(my_connect, connect)

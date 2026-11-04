@@ -381,8 +381,14 @@ static id spawn_part(const char *exe, CFArrayRef args) {
     for (CFIndex i = 0; i <= n; i++) free(argv[i]);
     free(argv);
     if (r) return NULL;
+    // 调用方按返回值判断成败（实测 QQ 拿到 nil 就报“更新失败”）。刚启动的程序要几十毫秒才向系统登记，等它登记好，最多 3 秒
     Class R = objc_getClass("NSRunningApplication");
-    return R ? ((id (*)(id, SEL, pid_t))objc_msgSend)((id)R, sel_registerName("runningApplicationWithProcessIdentifier:"), pid) : NULL;
+    id app = NULL;
+    for (int i = 0; R && !app && i < 150; i++) {
+        app = ((id (*)(id, SEL, pid_t))objc_msgSend)((id)R, sel_registerName("runningApplicationWithProcessIdentifier:"), pid);
+        if (!app) usleep(20000);
+    }
+    return app;
 }
 static IMP orig_launch_url, orig_open_app;
 static id g_launch_url(id self, SEL sel, id url, unsigned long opts, id config, id *err) {

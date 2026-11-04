@@ -605,7 +605,8 @@ func seedSpace(_ app: String, _ id: String, _ rule: Dict, container: Bool) {
 
 /// 结界文件夹里它自己的钥匙串：它存的登录凭据留在这里，读不到你的钥匙串。
 /// 家目录换到结界文件夹后，系统按新家目录里的偏好找钥匙串（实测），所以只改它自己的那份设置。
-/// 文件不能叫 login.keychain-db，系统会特殊对待、解不开锁（实测）。你的钥匙串在结界文件夹之外，不提供放开的选项。
+/// 文件不能叫 login.keychain-db（链接也不行），系统会特殊对待、解不开锁（实测）。系统在结界里找不到默认钥匙串，
+/// 由注入库把 SecItem 请求指向这个文件（inject.c 的“钥匙串”一节）。你的钥匙串在结界文件夹之外，不提供放开的选项。
 func privateKeychain(_ id: String) {
     let space = spaceOf(id)
     let kc = space + "/Library/Keychains/kekkai.keychain-db"

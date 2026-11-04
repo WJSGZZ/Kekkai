@@ -17,7 +17,7 @@ universal() {
 universal "$app/Contents/MacOS/Kekkai" -parse-as-library "$src/Sources/Kekkai.swift"
 clang -dynamiclib -fobjc-arc -Wno-deprecated-declarations -arch arm64 -arch x86_64 -framework Foundation -framework CoreLocation \
   "$src/Sources/fakeloc.m" -o "$sup/libfakeloc.dylib"
-clang -dynamiclib -arch arm64 -arch x86_64 -framework CoreFoundation -framework IOKit -framework SystemConfiguration -framework DiskArbitration -framework CoreGraphics -framework ColorSync -framework Network -lobjc \
+clang -dynamiclib -arch arm64 -arch x86_64 -framework CoreFoundation -framework IOKit -framework SystemConfiguration -framework DiskArbitration -framework CoreGraphics -framework ColorSync -framework Network -framework Security -lobjc \
   "$src/Sources/inject.c" -o "$sup/libkekkai.dylib"
 clang -fobjc-arc -arch arm64 -arch x86_64 -framework AppKit -framework CoreGraphics "$src/Sources/relay.m" -o "$sup/kekkai-relay"
 universal "$sup/kekkai" "$src/Sources/cli.swift"  # 命令行，编译成单个程序，不依赖系统 Python

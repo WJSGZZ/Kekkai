@@ -41,6 +41,7 @@
 #include <os/lock.h>
 #include <dns_sd.h>
 #include <Network/Network.h>
+#include <Security/Security.h>
 
 #define INTERPOSE(mine, theirs) \
     __attribute__((used)) static struct { const void *a, *b; } _i_##theirs \
@@ -1292,3 +1293,90 @@ INTERPOSE(my_sysctl, sysctl)
 INTERPOSE(my_sysctlbyname, sysctlbyname)
 INTERPOSE(my_SCDynamicStoreCopyComputerName, SCDynamicStoreCopyComputerName)
 INTERPOSE(my_SCDynamicStoreCopyLocalHostName, SCDynamicStoreCopyLocalHostName)
+
+// ---- 钥匙串 ----
+// 结界给每个软件一个私有钥匙串（kekkai.keychain-db），但家目录换了以后系统找不到“默认钥匙串”
+// （SecKeychainCopyDefault 得 -25307，偏好设置在结界里不落盘，进程内 SecKeychainSetDefault 也不生效，实测），
+// 未指定钥匙串的 SecItem 请求一律失败，软件存不下登录凭据。这里给没指定钥匙串的请求补上私有钥匙串。
+// 不用 login.keychain-db 这个名字让系统自己找到它：上锁时被访问，securityd 按登录钥匙串处理，
+// 之后用原密码在该路径上再也解不开（实测，换路径即可，直到注销）。
+// 重签后的副本没有 application-identifier，新式（数据保护）钥匙串报 -34018，同样退回私有钥匙串。
+static SecKeychainRef own_keychain(void) {
+    static SecKeychainRef kc;
+    static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+    if (!home) return NULL;
+    os_unfair_lock_lock(&lock);
+    if (!kc) {
+        char p[PATH_MAX];
+        snprintf(p, sizeof p, "%s/Library/Keychains/kekkai.keychain-db", home);
+        if (access(p, R_OK) == 0) SecKeychainOpen(p, &kc);
+    }
+    os_unfair_lock_unlock(&lock);
+    return kc;
+}
+
+static int wants_dp(CFDictionaryRef q) {
+    CFTypeRef v;
+    if (!q) return 0;
+    if (CFDictionaryGetValueIfPresent(q, kSecUseDataProtectionKeychain, &v) && v == kCFBooleanTrue) return 1;
+    if (CFDictionaryGetValueIfPresent(q, kSecAttrSynchronizable, &v) && v != kCFBooleanFalse) return 1;
+    return 0;
+}
+
+// 查证书和身份时系统钥匙串里的也要找得到，不限定在私有钥匙串。
+static int own_class(CFDictionaryRef q) {
+    CFTypeRef c = q ? CFDictionaryGetValue(q, kSecClass) : NULL;
+    return c && (CFEqual(c, kSecClassGenericPassword) || CFEqual(c, kSecClassInternetPassword) || CFEqual(c, kSecClassKey));
+}
+
+// 去掉新式钥匙串的标记，补上私有钥匙串；软件自己指定了钥匙串的不动。key 为 NULL 时只去标记。
+static CFDictionaryRef to_own(CFDictionaryRef q, CFStringRef key, SecKeychainRef kc) {
+    CFMutableDictionaryRef m = q ? CFDictionaryCreateMutableCopy(NULL, 0, q)
+                                 : CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFDictionaryRemoveValue(m, kSecUseDataProtectionKeychain);
+    CFDictionaryRemoveValue(m, kSecAttrSynchronizable);
+    if (key && !CFDictionaryContainsKey(m, kSecUseKeychain) && !CFDictionaryContainsKey(m, kSecMatchSearchList)) {
+        if (key == kSecUseKeychain) CFDictionarySetValue(m, key, kc);
+        else {
+            CFArrayRef l = CFArrayCreate(NULL, (const void **)&kc, 1, &kCFTypeArrayCallBacks);
+            CFDictionarySetValue(m, key, l);
+            CFRelease(l);
+        }
+    }
+    return m;
+}
+
+// 新式请求先照原样试（有正当权限的软件能用），报 -34018 或找不到（读的时候不报 -34018，实测）才退回私有钥匙串；
+// 其余请求直接指向私有钥匙串。
+#define KC_ROUTE(call_orig, call_own, q, key)                              \
+    SecKeychainRef kc = own_keychain();                                    \
+    if (!kc || (key != kSecUseKeychain && !own_class(q))) return call_orig; \
+    if (wants_dp(q)) {                                                     \
+        OSStatus s = call_orig;                                            \
+        if (s != errSecMissingEntitlement && s != errSecItemNotFound) return s; \
+    }                                                                      \
+    CFDictionaryRef nq = to_own(q, key, kc);                               \
+    OSStatus s = call_own;                                                 \
+    CFRelease(nq);                                                         \
+    return s;
+
+static OSStatus my_SecItemAdd(CFDictionaryRef q, CFTypeRef *result) {
+    KC_ROUTE(SecItemAdd(q, result), SecItemAdd(nq, result), q, kSecUseKeychain)
+}
+
+static OSStatus my_SecItemCopyMatching(CFDictionaryRef q, CFTypeRef *result) {
+    KC_ROUTE(SecItemCopyMatching(q, result), SecItemCopyMatching(nq, result), q, kSecMatchSearchList)
+}
+
+static OSStatus my_SecItemDelete(CFDictionaryRef q) {
+    KC_ROUTE(SecItemDelete(q), SecItemDelete(nq), q, kSecMatchSearchList)
+}
+
+static OSStatus my_SecItemUpdate(CFDictionaryRef q, CFDictionaryRef attrs) {
+    KC_ROUTE(SecItemUpdate(q, attrs), ({ CFDictionaryRef na = to_own(attrs, NULL, kc); OSStatus r = SecItemUpdate(nq, na); CFRelease(na); r; }), q, kSecMatchSearchList)
+}
+
+INTERPOSE(my_SecItemAdd, SecItemAdd)
+INTERPOSE(my_SecItemCopyMatching, SecItemCopyMatching)
+INTERPOSE(my_SecItemDelete, SecItemDelete)
+INTERPOSE(my_SecItemUpdate, SecItemUpdate)
